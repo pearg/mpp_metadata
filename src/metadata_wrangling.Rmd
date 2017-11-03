@@ -1,0 +1,2112 @@
+---
+title: "MPP Metadata Wrangling"
+author: "Jessica Chung"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+    toc_depth: 4
+    code_folding: show
+---
+
+Organise Mountain Pygmy Possum sample metadata from Excel spreadsheets.
+
+-----
+
+# Setup
+
+```{r}
+# knitr::opts_knit$set(root.dir = "..")
+```
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(stringr)
+library(readxl)
+library(forcats)
+```
+
+```{r}
+append_note <- function(x, existing_value, sep="; ") {
+  # Append a note separated with a delimiter if a comment already exists.
+  # Else, replace NA with note.
+  joined_values <- paste(existing_value, x, sep=sep)
+  new_value <- ifelse(is.na(existing_value) | existing_value == "",
+                      x, joined_values) %>%
+    str_replace("; $", "")
+  return(new_value)
+}
+```
+
+------
+
+# Read Spreadsheets
+
+Capture file stores instances of possum capture.  
+Genotype file stores microsat data and other possum data.  
+
+```{r}
+# Filenames
+capture_filename <- "/Users/jess/Work/2017_pearg/mpp_metadata/data/Btr2016_Master_25July2017_FINAL.xlsx"
+genotype_filename <- "/Users/jess/Work/2017_pearg/mpp_metadata/data/MPP_Master_Genotype_Phenotype_March2017\ copy.xlsx"
+```
+
+Read in capture spreadsheet.
+
+```{r}
+capture_xlsx <- read_excel(path=capture_filename, col_names=FALSE) %>%
+  as.data.frame()
+
+# Rename columns and rows
+new_col_names <- capture_xlsx[1,] %>% str_replace("1st wt", "first_weight") %>% 
+  str_replace_all(" ", "_") %>% tolower()
+data <- capture_xlsx[-1,] %>% magrittr::set_colnames(new_col_names) %>%
+  magrittr::set_rownames(NULL) %>% filter(! is.na(date))
+```
+
+View capture spreadsheet data.
+
+```{r}
+dim(data)
+data %>% head
+```
+
+Read in genotype spreadsheet.
+
+```{r}
+years <- c(2010, rep(2011:2015, each=2))
+sheet_names <- c(paste(years, c("", " juv"), sep=""), 
+                 "Zoo release 2013", "Hotham males 2010", 
+                 "Hotham males 2011", "Timms Spur males 2014")
+all_sheets <- list()
+
+for (sheet in sheet_names) {
+  # print(sheet)
+  temp_sheet <- read_excel(path=genotype_filename, sheet=sheet, 
+                           col_names=TRUE)
+  sheet_split <- strsplit(sheet, " ")
+  temp_sheet$from_sheet <- sheet
+  # Juveniles records are stored in sheets ending with 'juv'
+  if (str_detect(sheet, "juv$")) {
+    temp_sheet$life_stage <- "juvenile"
+  } else {
+    temp_sheet$life_stage <- "post-juvenile adult"
+  }
+  
+  # Insert specific data for each sheet
+  if (sheet == "Zoo release 2013") {
+    temp_sheet$YEAR <- "2013"
+    temp_sheet$wild_captive <- "captive"
+    temp_sheet$MOUNTAIN <- NA
+    temp_sheet$SOURCE_POPULATION <- 
+      "Australia:Victoria, Mount Buller, captive-bred at Healesville Sanctuary"
+  }
+  if (sheet == "Hotham males 2010") {
+    temp_sheet$YEAR <- "2010"
+    temp_sheet$SEX <- "2"
+    temp_sheet$MOUNTAIN <- "Mount Hotham"
+    temp_sheet$wild_captive <- "wild"
+  }
+  if (sheet == "Hotham males 2011") {
+    temp_sheet$YEAR <- "2011"
+    temp_sheet$MOUNTAIN <- "Mount Hotham"
+    temp_sheet$wild_captive <- "wild"
+  }
+  if (sheet == "Timms Spur males 2014") {
+    temp_sheet$YEAR <- "2014"
+    temp_sheet$MOUNTAIN <- "Timms Spur"
+    temp_sheet$wild_captive <- "wild"
+  }
+  if (sheet %in% sheet_names[1:11]) {
+    temp_sheet$YEAR <- sheet_split[[1]][1]
+    temp_sheet$MOUNTAIN <- "Mount Buller"
+    temp_sheet$wild_captive <- "wild"
+  }
+
+  # Change duplicate column names to be unique
+  is_dup <- temp_sheet %>% colnames %>% duplicated
+  index <- seq_len(sum(is_dup))
+  colnames(temp_sheet)[is_dup] <- paste(colnames(temp_sheet)[is_dup], index, sep="_")
+  
+  # Get columns which are factors
+  is_factor <- lapply(temp_sheet, class) %>% unlist %>% `==`("factor")
+  
+  # Convert factor columns into characters
+  if (sum(is_factor) > 0) {
+    message(paste("Converting factors into characters: ", names(is_factor)[is_factor]))
+    temp_sheet <- temp_sheet %>% mutate_if(is.factor, as.character)
+  }
+  
+  # Identify columns containing microsat genotypes, edit names appropriately,
+  # and add names for columns containing second allele
+  microsat_col1s <- which(!is.na(str_match(colnames(temp_sheet), pattern = "B[PC]")))
+  for(i in microsat_col1s){
+    col1_name <- colnames(temp_sheet)[i]
+    col2_name <- colnames(temp_sheet)[i+1]
+    if(str_sub(col1_name, -1, -1)==")"){
+      new_col1_name <- paste(str_sub(col1_name, 1, -1), "allele1", sep="") %>%
+        str_replace_all("[()]", "_")
+      new_col2_name <- paste(str_sub(col1_name, 1, -1), "allele2", sep="") %>%
+        str_replace_all("[()]", "_")
+      colnames(temp_sheet)[i:(i+1)] <- c(new_col1_name, new_col2_name)
+    }
+  }
+  # temp_sheet <- select(temp_sheet, -starts_with("X"))
+
+  # Store data
+  all_sheets[[sheet]] <- temp_sheet
+}
+```
+
+Sanity check before merging data frames.
+
+```{r message=FALSE}
+# Common columns. All dataframes should have these columns
+common_columns <-
+  c("SITE", "DATE", "DAY", "LINE", "POINT", "SPECIES", "ID", "SEX", 
+    "AGE", "PY", "WEIGHT", "NEW/RE", "Repro Cond", "Tail", "Body", 
+    "Head", "First captured", "Retag", "Notes", "hybrid alleles", 
+    "BP1_FAM_allele1", "BP1_FAM_allele2", "BP2_FAM_allele1", "BP2_FAM_allele2", 
+    "BP3_NED_allele1", "BP3_NED_allele2", "BP11_FAM_allele1", "BP11_FAM_allele2", 
+    "BP12_VIC_allele1", "BP12_VIC_allele2", "BP13_NED_allele1", "BP13_NED_allele2", 
+    "BP17_VIC_allele1", "BP17_VIC_allele2", "BP20_NED_allele1", "BP20_NED_allele2", 
+    "BC1_FAM_allele1", "BC1_FAM_allele2", "BC4_FAM_allele1", "BC4_FAM_allele2", 
+    "BC6_FAM_allele1", "BC6_FAM_allele2", "BC11_VIC_allele1", "BC11_VIC_allele2", 
+    "BC13_VIC_allele1", "BC13_VIC_allele2", "BC14_VIC_allele1", "BC14_VIC_allele2", 
+    "BC18_VIC_allele1", "BC18_VIC_allele2", "BC19_VIC_allele1", "BC19_VIC_allele2", 
+    "BC20_VIC_allele1", "BC20_VIC_allele2", "BC24_NED_allele1", "BC24_NED_allele2", 
+    "BC26_NED_allele1", "BC26_NED_allele2", "BC29_NED_allele1", "BC29_NED_allele2", 
+    "BC32_PET_allele1", "BC32_PET_allele2", "BC34_PET_allele1", "BC34_PET_allele2", 
+    "BC35_PET_allele1", "BC35_PET_allele2", "BC36_PET_allele1", "BC36_PET_allele2", 
+    "life_stage", "YEAR", "MOUNTAIN", "wild_captive", "from_sheet")
+
+# Other columns. Some dataframes have these columns
+other_columns <- c("SOURCE_POPULATION")
+
+# Make sure all dataframes have all common_columns
+stopifnot(sapply(all_sheets, function(x) {common_columns %in% colnames(x)}))
+
+# Get columns that aren't in common_columns or other_columns
+bad_columns <- lapply(all_sheets, function(x) {
+  ok_cols <- (colnames(x) %in% common_columns) | (colnames(x) %in% other_columns)
+  return(colnames(x)[! ok_cols])
+})
+
+# Make sure bad columns only have NA values so we can safely remove them later
+for (sheet in names(bad_columns)) {
+  for (col in bad_columns[[sheet]]) {
+    stopifnot(is.na(all_sheets[[sheet]][,col]))
+  }
+}
+
+# Only keep good columns. Mutate everything into characters. Join everything
+for (sheet in names(all_sheets)) {
+  good_columns <- c(common_columns, 
+                    other_columns[other_columns %in% colnames(all_sheets[[sheet]])])
+  df <- all_sheets[[sheet]][,good_columns] %>% mutate_all(as.character)
+  
+  if (sheet == names(all_sheets)[1]) {
+    all_data <- df
+  } else {
+    all_data <- full_join(all_data, df)
+  }
+}
+
+# Remove NA rows and convert to a dataframe
+genotype_data <- all_data %>% filter(! is.na(ID)) %>% as.data.frame
+
+# Rename non-microsat columns
+col_index <- ! str_detect(colnames(genotype_data), "allele[12]")
+colnames(genotype_data)[col_index] <- colnames(genotype_data)[col_index] %>% 
+  tolower() %>% str_replace_all("[ /]", "_")
+```
+
+```{r}
+dim(genotype_data)
+genotype_data %>% select(-contains("allele")) %>% head
+```
+
+------
+
+# Fix date and IDs
+
+All IDs should be four digits. Add a leading zero if not.
+B20743 is an exception since we only have the Healsville ID. 99999 was an 
+individual that escaped (new untagged individual but didn't manage to tag it
+on that trapping day).
+
+Some values in the ID column have two IDs in ####/#### format.
+In this case, the last value is the current tag and the first value
+should be noted as the old tag.
+
+### Capture data
+
+For capture data, date was encoded as days from 1900.
+
+```{r}
+# Date column encoded as days from 1900
+origin_date <- "1899-12-30"
+new_dates <- lubridate::days(data$date) + lubridate::ymd(origin_date)
+data$date <- new_dates
+
+data %>% head
+```
+
+Expect IDs to be 4 digits. If not, remove data and store elsewhere.
+
+```{r}
+# Some IDs are NA. Change to string.
+data <- data %>% mutate(id=ifelse(is.na(id), "NA", id))
+
+# IDs with replaced tags
+# Assume second tag is the most recent one and should be used in the ID column
+index <- data$id %>% str_detect("^[0-9]+/[0-9]+$") %>% which
+replaced_tags <- data[index,"id"]
+new_tag <- data[index,"id"] %>% str_split("/") %>% sapply(function(x) x[2])
+old_tag <- data[index,"id"] %>% str_split("/") %>% sapply(function(x) x[1])
+comment <- paste("Replaced tag", old_tag)
+
+# Add old tag in the "other" column
+data[index, "other"] <- append_note(comment, data[index, "other"])
+
+# Replace ID field with new tag
+data[index, "id"] <- new_tag
+
+# View
+data[index,]
+```
+
+```{r}
+# Remove IDs which have non-numeric characters
+not_ok <- data$id %>% str_detect("[^0-9]")
+removed_data <- data[not_ok,]
+data <- data[!not_ok,]
+
+# Add leading zeroes
+needs_leading_zeroes <- nchar(data$id) < 4
+data$id[needs_leading_zeroes] <- 
+  sprintf("%04d", as.numeric(data$id[needs_leading_zeroes]))
+```
+
+```{r}
+# Fill in fields for capture data
+data$year <- lubridate::year(data$date)
+data$mountain <- "Mount Buller"
+data$wild_captive <- "wild"
+data$source_population <- NA
+```
+
+### Genotype data
+
+```{r}
+# Replace 99999 ID with untagged
+genotype_data$id[genotype_data$id == "99999"] <- "untagged"
+
+## 8651/8175 should be flipped
+#genotype_data$id[genotype_data$id == "8651/8175"] <- "8175/8651"
+
+# Samples with multiple tags
+not_ok <- str_detect(genotype_data$id, "[^0-9]") & 
+  (genotype_data$id != "B20743") & (genotype_data$id != "untagged")
+genotype_data$id[not_ok]
+
+# IDs with replaced tags
+# Assume second tag is the most recent one and should be used in the ID column
+replaced_tags <- c(replaced_tags, genotype_data[not_ok, "id"])
+new_tag <- genotype_data[not_ok,"id"] %>% str_split("/") %>% sapply(function(x) x[2])
+old_tag <- genotype_data[not_ok,"id"] %>% str_split("/") %>% sapply(function(x) x[1])
+comment <- paste("Replaced tag", old_tag)
+
+# Add old tag in the "other" column
+genotype_data[not_ok, "notes"] <- append_note(comment, genotype_data[not_ok, "notes"])
+
+# Replace ID field with new tag
+genotype_data[not_ok, "id"] <- new_tag
+
+# Add leading zeroes
+needs_leading_zeroes <- nchar(genotype_data$id) < 4
+genotype_data$id[needs_leading_zeroes] <- 
+  sprintf("%04d", as.numeric(genotype_data$id[needs_leading_zeroes]))
+```
+
+### Replaced tags
+
+```{r}
+# Parse out replaced tags in genotype data notes
+# genotype_data %>% select(id, retag, notes) %>% filter(retag != 0 | !is.na(notes))
+txt <- genotype_data %>% select(id, date, retag, notes) %>% 
+  filter(notes != "Tagged as new adult in Jan-Feb 2015") %>% 
+  filter(str_detect(notes, "tag|[0-9]{4}")) %>%
+  mutate(x=paste(id, notes, sep=" - ")) %>% .$x
+txt
+
+# Extract all sequences of 4 digits
+replaced_tags <- txt %>% str_extract_all("[0-9]{4}") %>% lapply(unique)
+
+# Remove replicates
+replaced_tags <- replaced_tags %>% lapply(sort) %>% unique
+
+# 2012, 2013 and 2014 refer to the year and aren't IDs
+replaced_tags <- replaced_tags %>% lapply(function(x) {x[! x %in% seq(2012,2014)]})
+
+# 2172 looks like a typo. Looks like its supposed to be 8172. Remove it.
+replaced_tags <- replaced_tags %>% lapply(function(x) {x[x != "2172"]})
+
+# Length needs to be at least 2 to be useful
+replaced_tags <- replaced_tags[sapply(replaced_tags, length) > 1] %>% unique
+```
+
+
+```{r}
+# Parse out replaced tags in capture data notes
+# data %>% select(id, other) %>% filter(!is.na(other))
+txt <- data %>% select(id, date, other) %>% 
+  filter(str_detect(other, "tag") & str_detect(other, "[0-9]{4}")) %>%
+  mutate(x=paste(id, other, sep=" - ")) %>% .$x
+txt
+
+# Extract all sequences of 4 digits
+capture_replaced_tags <- txt %>% str_extract_all("[0-9]{4}") %>% lapply(unique)
+
+# Remove replicates
+capture_replaced_tags <- capture_replaced_tags %>% lapply(sort) %>% unique
+
+# Join with previous list and remove duplicates
+replaced_tags <- c(replaced_tags, capture_replaced_tags) %>% unique
+```
+
+```{r}
+# 8853 and 8854 looks like a typo from the original comment:
+# "Ripped ear tag from L ear. Replaced with 8853 in R ear and genetics sample taken M11BE"
+stopifnot(replaced_tags[[7]] == c("8853", "8854"))
+replaced_tags[[7]] <- NULL
+```
+
+```{r}
+replaced_tags
+```
+
+Go through the tags and mark the most recently seen one.
+
+```{r}
+newest_replaced_tag <- rep(NA, length(replaced_tags))
+for (i in seq_along(replaced_tags)) {
+  newest_replaced_tag[i] <- data %>% filter(id %in% replaced_tags[[i]]) %>% 
+    arrange(desc(date)) %>% .$id %>% .[1]
+}
+names(replaced_tags) <- newest_replaced_tag
+```
+
+```{r}
+replaced_tags
+```
+
+Find any instances of old tags and replace with new tag.
+
+```{r}
+for (i in seq_along(replaced_tags)) {
+  newest <- names(replaced_tags)[i]
+  old <- replaced_tags[[i]][replaced_tags[[i]] != newest]
+  if (any(old %in% data$id)) {
+    message("Updating ", newest, " in capture data")
+    data <- data %>% mutate(id=ifelse(id %in% old, newest, id))
+  }
+  if (any(old %in% genotype_data$id)) {
+    message("Updating ", newest, " in genotype data")
+    genotype_data <- genotype_data %>% mutate(id=ifelse(id %in% old, newest, id))
+  }
+}
+replaced_tags
+```
+
+-----
+
+# Arrange sheets
+
+### Different samples
+
+Check which samples in genotype data are not in capture data. All wild caputre
+records in the genotype data should be in the capture data.
+
+```{r}
+genotype_id_date <- paste(genotype_data$id, genotype_data$date, sep="_")
+capture_id_date <- paste(data$id, data$date, sep="_")
+
+# How many samples from genotype data in capture data?
+table(genotype_id_date %in% capture_id_date)
+```
+
+For matching individuals, sanity check that site, sex, and age match.
+
+```{r}
+# Get common samples
+common <- intersect(genotype_id_date, capture_id_date)
+genotype_common <- genotype_data[match(common, genotype_id_date),] %>%
+   select(-contains("allele"))
+capture_common <- data[match(common, capture_id_date),]
+genotype_common[is.na(genotype_common)] <- ""
+capture_common[is.na(capture_common)] <- ""
+
+x <- c("site", "sex", "age", "site", "line", "point")
+table(genotype_common[, x] == capture_common[, x], useNA="always")
+```
+
+Head, body, tail measurements are different though. Some are due to rounding
+and some due to floating point errors. Some of the values from the genotype
+data look like it's been averaged from the capture data (e.g ID 8446).
+
+```{r}
+x <- c("head", "body", "tail")
+sapply(x, function(y) {table(genotype_common[,y] == capture_common[,y])})
+
+compare <- cbind(genotype_common[,c("id",x)], capture_common[,x])
+colnames(compare) <- "id head.g body.g tail.g head.c body.c tail.c" %>%
+  str_split(" ") %>% unlist
+
+table(compare$head.g == compare$head.c)
+table(compare$body.g == compare$body.c)
+table(compare$tail.g == compare$tail.c)
+
+diff <- compare$head.g != compare$head.c
+compare[diff,] %>% head(10)
+```
+
+Use the measurement values from the capture data.
+
+```{r}
+# Where are the individuals that aren't in the capture data from?
+genotype_data[! genotype_id_date %in% capture_id_date,"from_sheet"] %>% table
+```
+
+Check if individuals from "2011 juv" sheet exist in capture data despite not
+having a capture date.
+
+```{r}
+juv_2011 <- genotype_data[! genotype_id_date %in% capture_id_date,] %>% 
+  filter(from_sheet == "2011 juv")
+data_2011 <- data %>% filter(lubridate::year(date) == 2011) %>% 
+  filter(age != 1, id %in% juv_2011$id)
+table(juv_2011$id %in% data_2011$id)
+data_2011$id %>% table
+```
+
+Check if individuals from "2012 juv" sheet exist in capture data despite not
+having a capture date.
+
+```{r}
+juv_2012 <- genotype_data[! genotype_id_date %in% capture_id_date,] %>% 
+  filter(from_sheet == "2012 juv")
+data_2012 <- data %>% filter(lubridate::year(date) == 2012)
+table(juv_2012$id %in% data_2012$id)
+```
+
+The individuals have records in the capture data spreadsheet, but not a one-to-one
+mapping. 2012 juv genotype data are not all marked as juvenile in the capture
+data. Assume that the capture spreadsheet is more acurate for juv samples age status.
+
+What about the records that have dates, but don't match to the capture spreadsheet?
+
+```{r}
+no_match <- genotype_data[! genotype_id_date %in% capture_id_date,] %>% 
+  filter(from_sheet %in% c("2011", "2013 juv", "2014")) %>%
+           select(-contains("allele"))
+
+no_match
+```
+
+```{r}
+no_match %>% filter(id == "0269")
+data %>% filter(id == "0269", lubridate::year(date) == 2011)
+```
+
+```{r}
+no_match %>% filter(id == "0388")
+data %>% filter(id == "0388", lubridate::year(date) == 2013)
+```
+
+
+```{r}
+no_match %>% filter(id == "untagged")
+data %>% filter(date == "2014-11-08", day == 4, line == 4, point == 13)
+```
+
+These three samples aren't seen in the capture data. Append these three
+instances to capture records.
+
+```{r}
+add_records <- no_match %>% rename(rep_con=repro_cond, new=new_re, other=notes) %>%
+  mutate(other=append_note("From genotype spreadsheet", other)) %>%
+  mutate(first_weight=NA) %>% .[,colnames(data)]
+
+data <- rbind(data, add_records)
+```
+
+### Fix notes
+
+Some notes/comments are different between the two sheets. Move genotype data
+notes to capture data notes.
+
+```{r}
+# Set NA values to empty strings for notes
+genotype_data <- genotype_data %>% mutate(notes=ifelse(is.na(notes), "", notes))
+data <- data %>% mutate(other=ifelse(is.na(other), "", other))
+
+diff <- genotype_data[match(common, genotype_id_date), c("notes")] != 
+  data[match(common, capture_id_date), c("other")]
+
+change <- diff & (genotype_data[match(common, genotype_id_date), c("notes")] != "")
+message("Different: ", sum(diff), "\nChanged: ", sum(change))
+
+# Append genotype comment to existing comment
+data[match(common, capture_id_date), "other"][change] <- 
+  append_note(genotype_data[match(common, genotype_id_date), "notes"][change],
+              data[match(common, capture_id_date), "other"][change])
+```
+
+### Fix reproduction condition
+
+Some repoduction condition values are different between the two sheets. Move 
+genotype data condition notes to capture data condition notes.
+
+```{r}
+# Set NA values to empty strings for notes
+genotype_data <- genotype_data %>% 
+  mutate(repro_cond=ifelse(is.na(repro_cond), "", repro_cond))
+data <- data %>% mutate(rep_con=ifelse(is.na(rep_con), "", rep_con))
+
+diff <- genotype_data[match(common, genotype_id_date), c("repro_cond")] != 
+  data[match(common, capture_id_date), c("rep_con")]
+
+change <- diff & (genotype_data[match(common, genotype_id_date), "repro_cond"] != "")
+message("Different: ", sum(diff), "\nChanged: ", sum(change))
+
+# Append rep_con comment to existing comment
+data[match(common, capture_id_date), "rep_con"][change] <- 
+  append_note(genotype_data[match(common, genotype_id_date), "repro_cond"][change],
+              data[match(common, capture_id_date), "rep_con"][change])
+```
+
+### Isolate genotype data
+
+Some samples have multiple genotype records with different values. Keep both.
+
+```{r}
+microsat_data <- genotype_data %>% 
+  select(id, contains("allele"), -hybrid_alleles)
+
+# Remove rows where there's no genotype data
+no_data <- microsat_data %>% select(-id) %>% is.na %>% rowMeans %>% 
+  magrittr::equals(1)
+microsat_data <- microsat_data[! no_data,]
+
+# Remove identical rows
+microsat_data <- microsat_data[! duplicated(microsat_data),] %>%
+  arrange(id)
+
+# Remove the record that has "No Genotype" as a value in BP1_FAM_allele1
+microsat_data <- microsat_data %>% filter(BP1_FAM_allele1 != "No Genotype")
+
+# Duplicated IDs with different values
+microsat_data$id %>% duplicated %>% table
+dup_ids <- microsat_data$id %>% duplicated %>% which %>% 
+  microsat_data$id[.] %>% unique
+
+# Add index
+microsat_data <- microsat_data %>% 
+  mutate(index=seq_len(nrow(microsat_data))) %>%
+  select(index, everything())
+
+# for (samp in dup_ids) {
+#   x <- microsat_data %>% filter(id == samp)
+#   diff <- sapply(seq_along(x), function(y) all(! duplicated(x[,y])))
+#   x[,diff]
+#   break
+# }
+
+microsat_data[1:6,1:6]
+```
+
+### Non-capture records
+
+Records which don't appear in the capture data (e.g. Hotham males 2010 & 2011, 
+Timms Spur males, Zoo releases).
+
+```{r}
+non_capture <- genotype_data %>% 
+  filter(from_sheet %in% c("Hotham males 2010", "Hotham males 2011",
+                           "Timms Spur males 2014", "Zoo release 2013")) %>%
+  select(-contains("allele"))
+
+# Check all non-caputre records are adults
+stopifnot(data$life_stage == "post-juvenile adult")
+
+# Remove columns which are empty
+empty <- non_capture %>% is.na %>% colMeans %>% magrittr::equals(1)
+non_capture <- non_capture[,! empty]
+
+# Join from sheet text to notes column and remove unnecessary columns
+non_capture <- non_capture %>% 
+  mutate(other=append_note(notes, from_sheet)) %>%
+  select(-notes, -from_sheet, -new_re, -life_stage) %>%
+  rename(rep_con=repro_cond)
+
+# Check there aren't duplicated ids
+stopifnot(! duplicated(non_capture$id))
+
+# Join non-capture records to capture data
+data <- full_join(data, non_capture)
+```
+
+-----
+
+# Possum phenotypes
+
+## New fields
+
+Constant values for all possums.
+
+```{r}
+data$taxon_id <- "38600"
+data$phylum <- "Chordata"
+data$class <- "Mammalia"
+data$order <- "Diprodontia"
+data$family <- "Burramyidae"
+data$genus <- "Burramys"
+data$species <- "Burramys parvus"
+data$subspecies <- NA
+data$common_name <- "Mountain pygmy possum"
+data$country <- "Australia"
+data$state_or_region <- "Victoria"
+```
+
+Unknown values.
+
+```{r}
+# Don't have these values
+# data$habitat <- NA
+# data$decimal_latitude <- NA
+# data$decimal_longitude <- NA
+
+# Not sure if non-capture records are also by Dean Heinze. Set them as NA.
+data <- data %>% 
+  mutate(identified_by=ifelse(is.na(date), NA, "Dean Heinze"),
+         collector=ifelse(is.na(date), NA, "Dean Heinze"))
+
+# TODO: Do these refer to sample collection? If so, should store in another table
+# data$collection_method <- NA
+# data$collection_date <- NA
+```
+
+## Site
+
+```{r}
+# Convert SITE column to site_name, site_code, site_notes which can later 
+# easily be combined into a 'location_text' field to comply with the OMG sample 
+# metadata template.
+# NB. Currently SITE values are only included for Mount Buller samples.
+
+# Code lookup table
+buller_site_lookup <- c("Federation", "Federation", "Wombat Valley", 
+                       "Wombat Valley", "Women's Run", "Federation")
+names(buller_site_lookup) <- c("324", "329", "331", "332", "334", "350")
+
+# Extract numbers from SITE
+site_code <- str_extract(data$site, pattern="[0-9]+")
+site_names <- buller_site_lookup[site_code] %>% setNames(NULL)
+
+# site_notes <- str_extract_all(data$site, pattern="[a-zA-Z]+")
+# site_notes_full <- all_data$SITE[which(lapply(site_notes, length)>0)]
+
+# Set location in dataframe
+data$location <- paste(data$mountain, site_names, data$site, sep=", ")
+
+# Remove site column
+data <- data %>% select(-site)
+```
+
+## Sex
+
+Change `1`s to female and `2`s to male.
+
+```{r}
+data <- data %>% 
+  mutate(sex=as.character(fct_recode(as.factor(sex), female="1", male="2")))
+data$sex[is.na(data$sex)] <- "not determined"
+
+table(data$sex, useNA = "always")
+```
+
+## Body measurements
+
+Body, head, tail, and weight
+
+```{r}
+non_numeric_values <- function(x) {
+  return(x[str_detect(x, "[^0-9.]") & ! is.na(x)])
+}
+
+# Print out non-numeric values that need to be fixed
+non_numeric_values(data$body)
+non_numeric_values(data$head)
+non_numeric_values(data$tail)
+non_numeric_values(data$weight)
+```
+
+```{r}
+# Replace non-numeric tail data as NA
+data$tail[data$tail %in% non_numeric_values(data$tail)] <- NA
+
+# Remove ~ and ? values in weight values
+data <- data %>% mutate(weight=str_replace_all(weight, "[?~]", ""))
+
+# Replace "nr" values as NA
+data$weight[data$weight == "nr"] <- NA
+```
+
+Convert values to numeric.
+
+```{r}
+data <- data %>% mutate(
+  body=as.numeric(body),
+  head=as.numeric(head),
+  tail=as.numeric(tail),
+  weight=as.numeric(weight)
+)
+```
+
+There are some values that look like errors.
+
+```{r}
+apply(data[,c("body", "head", "tail", "weight")], 2, function(x) {
+  quantile(x, probs=c(seq(0,0.75,by=0.25), 0.8, 0.9, 0.95, 0.98, 0.99, 0.995, 1), 
+           na.rm=TRUE)})
+
+data %>% filter(weight > 70) %>% arrange(weight)
+```
+
+Going to assume that anything over 100 is an error and set it to NA.
+
+```{r}
+data <- data %>% mutate(weight=ifelse(weight > 100, NA, weight))
+```
+
+Fix any obvious inconsistancies for weight over 70. Manually check other
+records and set the large value as NA if it looks abnormal.
+
+```{r}
+data %>% filter(id == "0386") %>% .$weight
+data %>% filter(id == "8220") %>% .$weight
+data %>% filter(id == "7331") %>% .$weight
+data %>% filter(id == "8175") %>% .$weight
+
+# Set all 4 large values as NA
+data <- data %>% mutate(weight=ifelse(weight > 70, NA, weight))
+```
+
+
+## Age
+
+- age 1: adult
+- age 2: juvenile
+- age 3: immature adult, young adult, sub-adult
+
+```{r}
+# Two instances of non-valid age codes, id 8852. Marked as juvenile and
+# adult, but one day apart.
+data %>% filter(! age %in% 1:3 & ! is.na(age))
+
+# From their rep_cond, assume 8852 is an adult
+data <- data %>% mutate(age=ifelse(age %in% c("Adult", "Juvenile"), 1, age))
+
+# How many in each group
+data$age %>% table(useNA="always")
+```
+
+Check weight distribution of different ages.
+
+```{r}
+ggplot(data, aes(x=weight)) +
+  geom_density() +
+  facet_grid(age~.)
+```
+
+Some adults are marked as having immature juvenile pouches. These should be
+age 3.
+
+```{r}
+# How many adults need to be changed?
+data %>% filter(str_detect(rep_con, "juvenile"), age == "1") %>% 
+  .$rep_con %>% table
+
+data <- data %>% mutate(
+  age=ifelse(rep_con == "undeveloped juvenile pouch, not pregnant", 3, age))
+```
+
+What rep conditions do juveniles have?
+
+```{r}
+data %>% filter(age == 2) %>% .$rep_con %>% table
+```
+
+What rep conditions do immature adults have?
+
+```{r}
+data %>% filter(age == 3) %>% .$rep_con %>% table
+```
+
+Recode age number as life-stage.
+
+```{r}
+data <- data %>%
+  mutate(life_stage=ifelse(age == 1, "adult", NA),
+         life_stage=ifelse(age == 2, "juvenile", life_stage),
+         life_stage=ifelse(age == 3, "immature adult", life_stage))
+```
+
+```{r}
+data$life_stage %>% table(useNA="always")
+```
+
+## Pouch young
+
+Should contain either a number, NA, or undetermined.
+
+```{r}
+# Copy py column to number_of_pouch_young and rename py to py_raw
+data <- data %>% mutate(number_of_pouch_young=py)
+```
+
+Check male values. Should be all NA.
+
+```{r}
+data %>% filter(sex == "male") %>% .$number_of_pouch_young %>% table(useNA="always")
+
+data %>% filter(number_of_pouch_young %in% c("juv", "t10mm")) %>% 
+  select(date, id:rep_con)
+```
+
+Remove juv values and assume `t10mm` refers to testis size and move to rep con.
+Then set all male `number_of_pouch_young` to `NA`.
+
+```{r}
+# Replace "t10mm" value
+data$rep_con[data$number_of_pouch_young == "t10mm" &
+               ! is.na(data$number_of_pouch_young)] <- "10"
+
+# Remove male number_of_pouch_young values
+data <- data %>% mutate(
+  number_of_pouch_young=ifelse(sex == "male", NA, number_of_pouch_young))
+```
+
+Juvenile and immature females should have zero or `NA` pouch young.
+
+```{r}
+# Check juvenile females have either NA or 0 pouch young
+stopifnot(data %>% 
+            filter(sex == "female" & life_stage != "adult") %>% 
+            .$number_pouch_young %>% magrittr::is_in(c(NA, "0")))
+```
+
+Adult females should have a numeric value or `undetermined`.
+
+```{r}
+# Change NA values of post-juvenile females to "undetermined"
+adult_females_na <- with(data, sex == "female" & 
+                           life_stage == "adult" &
+                           is.na(number_of_pouch_young))
+adult_females_na[is.na(adult_females_na)] <- FALSE
+data[adult_females_na,"number_of_pouch_young"] <- "undetermined"
+```
+
+Fix invalid values. Some values belong in rep condition.
+
+```{r}
+table(data$number_of_pouch_young)
+```
+
+```{r}
+# Set `2 or 3` value to `3` since it's more likely
+data <- data %>% mutate(number_of_pouch_young=ifelse(
+  number_of_pouch_young == "2 or 3", "3", number_of_pouch_young))
+
+# Set `2? Py` value to `2`
+data <- data %>% mutate(number_of_pouch_young=ifelse(
+  number_of_pouch_young == "2? Py", "2", number_of_pouch_young))
+
+# Some values with Xpy and some extra rep condition information
+x <- str_detect(data$number_of_pouch_young, "\\dpy") & 
+  ! is.na(data$number_of_pouch_young)
+data$number_of_pouch_young[x]
+
+# Separate as number of pouch young and rep condition
+match <- data$number_of_pouch_young[x] %>% str_match("^(\\d)py (\\w+)$")
+match
+
+# Replace values in pouch young column
+data$number_of_pouch_young[x] <- match[,2]
+
+# Append rep condition
+data$rep_con[x] <- append_note(match[,3], data$rep_con[x])
+```
+
+For the remaining values, append to rep condition.
+
+```{r}
+data %>% filter(! number_of_pouch_young %in% c(0,1,2,3,4,"undetermined",NA)) %>%
+  .$number_of_pouch_young %>% unique
+
+# Append note
+x <- ! data$number_of_pouch_young %in% c(0,1,2,3,4,"undetermined",NA)
+data$rep_con[x] <- append_note(data$number_of_pouch_young[x], data$rep_con[x])
+data$number_of_pouch_young[x] <- "undetermined"
+```
+
+How many in each group?
+
+```{r}
+table(data$number_of_pouch_young, useNA="always")
+```
+
+## Reproductive condition
+
+```{r}
+data <- data %>% mutate(reproductive_condition=rep_con,
+                        misc_reproductive_notes="")
+```
+
+
+Handle `2nd Litter values` by moving them to the other column.
+
+```{r}
+data %>% filter(str_detect(reproductive_condition, "2nd|second")) %>% 
+  .$reproductive_condition %>% table
+
+prob_second <- str_detect(data$reproductive_condition, "2nd|second")
+
+# Remove from reproductive condition
+data[prob_second, "reproductive_condition"] <- 
+  data[prob_second, "reproductive_condition"] %>%
+  str_replace("(; )?(2nd Litter\\?)|(, prob 2nd litter)|(, second litter)", "") %>%
+  str_replace("second or late litter", "")
+
+# Add "2nd litter?" to notes column
+data[prob_second, "misc_reproductive_notes"] <- 
+  append_note("2nd litter?", data[prob_second, "misc_reproductive_notes"])
+```
+
+### Male conditions
+
+#### Testes condition
+
+Handle male reproductive info. This refers to testis size conditions.
+
+```{r}
+# Set testis_size_status as either "normal" or "enlarged" for adult males, 
+# and NA for females and juvenile males. Enlarged males are identified as 
+# having a numerical figure in rep_con.
+
+# Some juveniles have values in reproductive condition
+data %>% filter(sex == "male", life_stage != "adult", 
+                reproductive_condition != "") %>%
+  mutate(x=paste(life_stage, reproductive_condition, sep=" - ")) %>%
+  .$x
+
+# Set testis_size_status
+data <- data %>%
+  mutate(testis_size_status=ifelse(sex == "male" & life_stage == "adult",
+                                   "normal", NA)) %>%
+  mutate(testis_size_status=ifelse(sex == "male" & life_stage == "adult" &
+                                     str_detect(reproductive_condition, "\\d"),
+                                   "enlarged", testis_size_status))
+```
+
+#### Testes size
+
+Handle cases where there's numeric data only.
+
+```{r}
+# Male possums with numerical values
+testis_info <- data$sex == "male" & ! is.na(data$reproductive_condition) &
+  str_detect(data$reproductive_condition, "^\\d+(.\\d)?$")
+
+# What values?
+data[testis_info,"reproductive_condition"] %>% table
+
+# Set testis_size_in_mm
+data$testis_size_in_mm <- NA
+data$testis_size_in_mm[testis_info] <- data[testis_info,"reproductive_condition"]
+
+# Remove values from repro condition
+data[testis_info,"reproductive_condition"] <- ""
+```
+
+Some cases were the values are `x by y`. Use `x` value.  
+Some cases were the values are `x * 2`. Use `x` value.
+
+```{r}
+# Get matching possums
+testis_info <- data$sex == "male" & ! is.na(data$reproductive_condition) &
+  str_detect(data$reproductive_condition, "by|\\*")
+
+# What values?
+data[testis_info,"reproductive_condition"] %>% unique
+
+# Extract first number
+match <- data[testis_info, "reproductive_condition"] %>% 
+  str_match("^(\\d+(\\.\\d)?)(.+)$")
+match %>% head
+
+# Set testis_size_in_mm
+data$testis_size_in_mm[testis_info] <- match[,2]
+
+# Remove values from repro condition
+data[testis_info,"reproductive_condition"] <- ""
+```
+
+Manually tidy up specific strings which are in the format of `Txmm`.
+
+```{r}
+data$reproductive_condition[data$reproductive_condition == "T6"] <- "6mm tes"
+data$reproductive_condition[data$reproductive_condition == "T12mm"] <- "12mm tes"
+data$reproductive_condition[data$reproductive_condition == "T6x12"] <- "12mm tes"
+```
+
+Handle cases of `xmm tes`.
+
+```{r}
+# Get matching possums
+testis_info <- data$sex == "male" & ! is.na(data$reproductive_condition) &
+  str_detect(data$reproductive_condition, "mm tes")
+
+# What values?
+data[testis_info,"reproductive_condition"] %>% unique
+
+# Extract first number
+match <- data[testis_info, "reproductive_condition"] %>% 
+  str_replace("mm tes", "")
+
+# Set testis_size_in_mm
+data$testis_size_in_mm[testis_info] <- match
+
+# Remove values from repro condition
+data[testis_info,"reproductive_condition"] <- ""
+```
+
+Handle remaining cases manually.
+
+Those with numerical values.
+
+```{r}
+# Values to fix containing a numerical value
+x <- data$sex == "male" & ! is.na(data$reproductive_condition) & 
+  str_detect(data$reproductive_condition, "\\d")
+data[x,"reproductive_condition"]
+
+# "6, no orange tinge"
+index <- data$reproductive_condition == "6, no orange tinge"
+data[index,"testis_size_in_mm"] <- "6"
+data[index,"reproductive_condition"] <- ""
+data[index,"other"] <- append_note("no orange tinge", data[index,"other"])
+
+# "6, grey fur around genitals"
+index <- data$reproductive_condition == "6, grey fur around genitals"
+data[index,"testis_size_in_mm"] <- "6"
+data[index,"reproductive_condition"] <- ""
+data[index,"other"] <- append_note("grey fur around genitals", data[index,"other"])
+
+# "<5"
+index <- data$reproductive_condition == "<5"
+data[index,"reproductive_condition"] <- ""
+data[index,"misc_reproductive_notes"] <- 
+  append_note("testes size < 5", data[index,"misc_reproductive_notes"])
+```
+
+Remaining values should go into the `other` or `misc_reproductive_notes` column.
+
+```{r}
+# Values to fix containing a numerical value
+x <- data$sex == "male" & ! is.na(data$reproductive_condition) & 
+  str_detect(data$reproductive_condition, "tes")
+data[x,"reproductive_condition"]
+
+# Append to notes in misc_reproductive_notes
+data[x,"misc_reproductive_notes"] <- 
+  append_note(data[x,"reproductive_condition"], data[index,"misc_reproductive_notes"])
+
+# Remove values from repro condition
+data[x,"reproductive_condition"] <- ""
+```
+
+```{r}
+# Values to fix containing a numerical value
+x <- data$sex == "male" & ! is.na(data$reproductive_condition) & 
+  data$reproductive_condition != ""
+data[x,"reproductive_condition"]
+
+# Append to notes in other
+data[x,"other"] <- append_note(data[x,"reproductive_condition"], data[index,"other"])
+
+# Remove values from repro condition
+data[x,"reproductive_condition"] <- ""
+```
+
+```{r}
+# Check that all repro condition values should be blank for males
+stopifnot(data %>% filter(sex == "male") %>% .$reproductive_condition %>% 
+  magrittr::equals(""))
+```
+
+### Female conditions
+
+```{r}
+# data %>% select(date, id, sex,reproductive_condition, number_of_pouch_young) %>%
+#   filter(sex == "female")
+```
+
+#### Pregnancy and breeding status
+
+Create new column for pregnancy status.  
+Possible values: not pregnant, likely not pregnant, likely pregnant, pregnant
+
+```{r}
+data <- data %>% mutate(pregnancy_status="")
+```
+
+Bred status (first year not pregnant and bred). 
+Move to `misc_reproductive_notes`.
+
+```{r}
+# Get matching possums with pregnancy status
+regex_string <- "1st year not preg|(prob )?bred in spring|bred\\?|bred last y(ear|r)|bred before|not bred|pos bred in prev years|prev had young\\?"
+index <- str_detect(data$reproductive_condition, regex_string) &
+  data$life_stage == "adult"
+
+# What values?
+data[index,"reproductive_condition"] %>% unique
+
+# Match string
+match <- data[index,"reproductive_condition"] %>% 
+  str_match(regex_string)
+
+# Add to misc_reproductive_notes
+data[index,"misc_reproductive_notes"] <- 
+  append_note(match[,1], data[index,"misc_reproductive_notes"])
+
+# Remove bred condition in reproductive_condition
+data[index,"reproductive_condition"] <- 
+  data[index,"reproductive_condition"] %>% str_replace_all(regex_string, "")
+```
+
+Two cases to handle manually.
+
+```{r}
+index <- str_detect(data$reproductive_condition, "1st year|bred") &
+  data$life_stage == "adult"
+
+# What values?
+data[index,"reproductive_condition"] %>% unique
+
+# "bred ldp"
+index <- data$reproductive_condition == "bred ldp"
+data[index,"reproductive_condition"] <- "ldp"
+data[index,"misc_reproductive_notes"] <- "bred"
+
+# "pl?? May not have bred this year"
+index <- data$reproductive_condition == "pl?? May not have bred this year"
+data[index,"reproductive_condition"] <- ""
+data[index,"misc_reproductive_notes"] <- "Post lactating?; May not have bred this year"
+```
+
+Likely not pregnant statuses. Handle these manually.
+
+```{r}
+# Get matching possums with pregnancy status
+x <- str_detect(data$reproductive_condition, "not preg\\?|prob not preg|pos not preg")
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# "lop not preg?"
+index <- data$reproductive_condition == "lop not preg?"
+data[index,"reproductive_condition"] <- "lop"
+data[index,"pregnancy_status"] <- "likely not pregnant"
+
+# "lop not moist/greasy prob not preg"
+# Change not moist/greasy to dry
+index <- data$reproductive_condition == "lop not moist/greasy prob not preg"
+data[index,"reproductive_condition"] <- "ldop"
+data[index,"pregnancy_status"] <- "likely not pregnant"
+
+# "ldop pos not preg, pos bred in prev years"
+index <- data$reproductive_condition == "ldop pos not preg, pos bred in prev years"
+data[index,"reproductive_condition"] <- "ldop"
+data[index,"pregnancy_status"] <- "likely not pregnant"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("pos bred in prev years", data[index,"misc_reproductive_notes"])
+```
+
+Not pregnant statuses.
+
+```{r}
+# Get matching possums with pregnancy status
+index <- str_detect(data$reproductive_condition, "not preg|(n. preg)")
+
+# What values?
+data[index,"reproductive_condition"] %>% unique
+
+# Set pregnancy status
+data[index,"pregnancy_status"] <- "not pregnant"
+
+# Remove status from reproductive_condition
+data[index,"reproductive_condition"] <- 
+  data[index,"reproductive_condition"] %>% 
+  str_replace("not preg(nant)?|(n. preg)", "")
+```
+
+Likley pregnant cases.
+
+```{r}
+# Get matching possums with pregnancy status
+regex_string <- "preg(nant)?\\?|prob preg|like(ly)? preg(\\.)?|pos (now )?preg"
+index <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[index,"reproductive_condition"] %>% unique
+
+# Set pregnancy status
+data[index,"pregnancy_status"] <- "likely pregnant"
+
+# Remove status from reproductive_condition
+data[index,"reproductive_condition"] <- data[index,"reproductive_condition"] %>% 
+  str_replace(regex_string, "")
+```
+
+Pregnant cases.
+
+```{r}
+# Get matching possums with pregnancy status
+regex_string <- "(heavily )?preg(nant)?(, birth imminent)?"
+index <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[index,"reproductive_condition"] %>% unique
+
+# Set pregnancy status
+data[index,"pregnancy_status"] <- "pregnant"
+
+# Remove status from reproductive_condition
+data[index,"reproductive_condition"] <- data[index,"reproductive_condition"] %>% 
+  str_replace_all(regex_string, "")
+```
+
+Check there are no pregnancy values left.
+
+```{r}
+stopifnot(! str_detect(data$reproductive_condition, "preg"))
+```
+
+#### Size of young
+
+If multiple young, take the value of the largest.
+
+Values with all numerical values refer to pouch young size in mm.
+
+```{r}
+data <- data %>% mutate(pouch_young_size_in_mm="")
+```
+
+```{r}
+# Get matching possums
+index <- str_detect(data$reproductive_condition, "^\\d+$")
+
+# What values?
+data[index,"reproductive_condition"] %>% table
+
+# Add number to pouch_young_size_in_mm
+data[index, "pouch_young_size_in_mm"] <- data[index,"reproductive_condition"]
+
+# Remove status from reproductive_condition
+data[index,"reproductive_condition"] <- ""
+```
+
+Some have values in the format of `xmm`
+
+```{r}
+# Get matching possums
+index <- str_detect(data$reproductive_condition, "^\\d+mm$")
+
+# What values?
+data[index,"reproductive_condition"] %>% table
+
+# Add number to pouch_young_size_in_mm
+data[index, "pouch_young_size_in_mm"] <- 
+  data[index,"reproductive_condition"] %>%
+  str_replace("mm$", "")
+
+# Remove status from reproductive_condition
+data[index,"reproductive_condition"] <- ""
+```
+
+Handle neonate cases manually.
+
+```{r}
+# Get matching possums
+x <- str_detect(data$reproductive_condition, "extra|neonate|born")
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# "py prob born 2 nights ago"
+index <- data$reproductive_condition == "py prob born 2 nights ago"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("Pouch young probably born 2 nights ago",
+              data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+
+# "6 born o/n"
+index <- data$reproductive_condition == "6 born o/n"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("6 neonates",
+              data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+
+# "6 plus 1 neonate born overnight"
+index <- data$reproductive_condition %in% 
+  c("6 plus 1 neonate born overnight", "6mm plus 1 born overnight")
+data[index,"pouch_young_size_in_mm"] <- "6"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("1 extra neonate", data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+
+# "6 plus 4 neonates born overnight"
+index <- data$reproductive_condition == "6 plus 4 neonates born overnight"
+data[index,"pouch_young_size_in_mm"] <- "6"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("4 extra neonates", data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+
+# "6 plus 2 neonates"
+index <- data$reproductive_condition == "6 plus 2 neonates"
+data[index,"pouch_young_size_in_mm"] <- "6"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("2 extra neonates", data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+
+# "5mm, plus 1 extra young born overnight"
+index <- data$reproductive_condition == "5mm, plus 1 extra young born overnight"
+data[index,"pouch_young_size_in_mm"] <- "5"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("1 extra neonate", data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+
+# "5mm, plus 2 extra young born overnight"
+index <- data$reproductive_condition == "5mm, plus 2 extra young born overnight"
+data[index,"pouch_young_size_in_mm"] <- "5"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("2 extra neonates", data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+
+# "6 plus 5 neonates"
+index <- data$reproductive_condition == "6 plus 5 neonates"
+data[index,"pouch_young_size_in_mm"] <- "6"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("5 extra neonates", data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+
+# "5mm probably born overnight"
+index <- data$reproductive_condition == "5mm probably born overnight"
+data[index,"pouch_young_size_in_mm"] <- "5"
+data[index,"misc_reproductive_notes"] <- 
+  append_note("Probaby gave birth overnight", data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+```
+
+A few cases with multiple young to handle manually.
+
+```{r}
+### save point
+# save.image(file="cache/image_2017-11-02.RData")
+# load("cache/image_2017-11-02.RData")
+```
+
+
+```{r}
+# Get matching possums
+x <- str_detect(data$reproductive_condition, "^\\d{2}|20mm") &
+  ! str_detect(data$reproductive_condition, ";")
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# "146?" should be a comment
+index <- data$reproductive_condition == "146?"
+data[index,"other"] <- append_note("146?", data[index,"other"])
+data[index,"reproductive_condition"] <- ""
+
+# "25 grey"
+index <- data$reproductive_condition == "25 grey"
+data[index,"pouch_young_size_in_mm"] <- "25"
+data[index,"reproductive_condition"] <- ""
+
+# "4PY 20mm"
+index <- data$reproductive_condition == "4PY 20mm"
+data[index,"number_of_pouch_young"] <- "4"
+data[index,"pouch_young_size_in_mm"] <- "20"
+data[index,"reproductive_condition"] <- ""
+```
+
+Some values have two numbers. Take the largest one.
+
+```{r}
+# Get matching possums
+x <- str_detect(data$reproductive_condition, "\\d; \\d")
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# Get largest pouch young
+largest_size <- data[x,"reproductive_condition"] %>% 
+  str_split("; ") %>% 
+  sapply(function(sizes) {max(as.numeric(sizes))})
+
+# Get smallest pouch young
+smallest_comment <- data[x,"reproductive_condition"] %>% 
+  str_split("; ") %>% 
+  sapply(function(sizes) {min(as.numeric(sizes))}) %>%
+  paste0("Additional pouch young of size ", ., "mm")
+
+# Insert values
+data[x,"pouch_young_size_in_mm"] <- largest_size
+data[x,"misc_reproductive_notes"] <- 
+  append_note(smallest_comment, data[x,"misc_reproductive_notes"])
+
+# Remove values
+data[x, "reproductive_condition"] <- ""
+```
+
+#### Pouch condition
+
+```{r}
+data <- data %>% mutate(pouch_condition="")
+```
+
+Handle cases of juvenile pouches.
+
+```{r}
+x <- str_detect(data$reproductive_condition, "[Jj]uv")
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# Which possums are marked as adult, but rep condition indicates juvenile
+discordant <- data %>% filter(life_stage == "adult",
+                str_detect(reproductive_condition, "[Jj]uv")) %>%
+  select(reproductive_condition, life_stage) %>% unique
+discordant
+
+# These should be immature adults
+x <- str_detect(data$reproductive_condition, 
+                "^(juv p|Juv P LP unused clean n~0.5( much FIP)?)$")
+data[x,"life_stage"] <- "immature adult"
+
+# Keep FIP info if available
+# data[x,"reproductive_condition"] <- data[x,"reproductive_condition"] %>% 
+#   str_replace("^(juv p|Juv P LP unused clean n~0.5)( )?", "")
+
+data[x,"other"] <- append_note(data[x,"reproductive_condition"] %>%
+  str_replace("^(juv p|Juv P LP unused clean n~0.5)( )?", ""),
+  data[x,"other"])
+
+# Remove juvenile pouch values since they're uninformative
+data[x,"reproductive_condition"] <- ""
+```
+
+```{r}
+# There's one instance (id 1932, date 18/2/15, weight 29) of a juvenile 
+# marked as post-lactating. Assume that the life stage is accurate and 
+# reproductive condition is incorrect.
+# data %>% filter(life_stage == "juvenile", reproductive_condition != "") %>%
+#   select(id, date, life_stage, reproductive_condition)
+
+# Values
+x <- ! is.na(data$life_stage) & data$life_stage == "juvenile" & 
+  data$reproductive_condition != ""
+data[x,"reproductive_condition"] %>% unique
+
+# Remove unneeded information
+new_value <- data[x,"reproductive_condition"] %>% 
+  str_replace("Post lactating|clean pouch|nolac|nonlac|no signs of lac", "")
+
+# Append comment to other column
+data[x,"other"] <- append_note(new_value, data[x,"other"])
+
+# Remove reproductive condition
+data[x,"reproductive_condition"] <- ""
+
+```
+
+Handle immature adult cases.
+
+```{r}
+# Values
+x <- ! is.na(data$life_stage) & data$life_stage == "immature adult" & 
+  data$reproductive_condition != ""
+data[x,"reproductive_condition"] %>% unique
+
+# Clean pouch status is unncessary since they're immature adults
+regex_string <- "juv pouch|undeveloped juvenile pouch, |not bred juv p|clean pouch juv cond|clean pouch|undev pouch|clean"
+data[x,"reproductive_condition"] <- data[x,"reproductive_condition"] %>%
+  str_replace(regex_string, "")
+```
+
+Manually handle weird cases. Sometimes "dry" refers to pouch and sometimes
+nipples.
+
+```{r}
+x <- str_detect(data$reproductive_condition, "dry|clean|moist")
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+find_replace <- list(
+  "ldp dry ; lmdop" = "dry lmdop",
+  "dry p, , , lop nip 1.5mm" = "dry lop; nip 1.5mm",
+  "lop ; dry p, , , lop nip 1.5mm" = "dry lop; nip 1.5mm",
+  "post lactating, fully dry contracted pouch and nipples" =
+    "dry p; post lactating; contracted pouch and nipples",
+  "lop dry abort" = "dry lop; abort",
+  "dry, " = "dry p",
+  "dry " = "dry p",
+  "4 sw nip, dry, " = "4swn dry",
+  "clean pouch" = "clean p",
+  "lop  orange moist" = "lmop",
+  "moist p" = "mp",
+  "lmop , wet and moist pouch may give birth soon" = 
+    "lmop; may give birth soon"
+)
+
+for (old in names(find_replace)) {
+  data <- data %>% mutate(
+    reproductive_condition=ifelse(reproductive_condition == old, 
+                                  find_replace[[old]], reproductive_condition))
+}
+```
+
+Pouch status: loose, moist, dark, orange, etc.
+
+```{r}
+regex_string <- "(\\b|^)(clean )?(dry )?(moist )?([Ll]?[Mm]?[Dd]?[Oo]?[Pp])(\\b|$)"
+x <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[x,"reproductive_condition"] %>% unique %>% head
+
+# Regex match
+match <- data[x,"reproductive_condition"] %>%
+  str_match(regex_string)
+match[,1] %>% tolower %>% unique
+
+# Move pouch condition to separate column
+data[x, "pouch_condition"] <- match[,1] %>% tolower
+
+# Remove pouch condition from rep condition
+data[x,"reproductive_condition"] <- data[x,"reproductive_condition"] %>%
+  str_replace(match[,1], "")
+```
+
+Manually edit a few cases.
+
+```{r}
+# "lodp"
+index <- data$reproductive_condition == "lodp"
+stopifnot(data[index,"pouch_condition"] == "")
+data[index,"pouch_condition"] <- "ldop"
+data[index,"reproductive_condition"] <- ""
+
+# "; lmop "
+index <- data$reproductive_condition == "; lmop "
+stopifnot(data[index,"pouch_condition"] == "lmop")
+data[index,"reproductive_condition"] <- ""
+```
+
+#### Lactation status
+
+```{r}
+data <- data %>% mutate(lactation_status="")
+```
+
+Not lactating possums.
+
+```{r}
+# How many possums have non-lactating status
+values <- c("Not lac", "nonlac", "no signs of lac")
+sum(data$reproductive_condition %in% values)
+
+# Replace values
+data <- data %>% mutate(
+  lactation_status=ifelse(reproductive_condition %in% values, 
+                          "not lactating", lactation_status),
+  reproductive_condition=ifelse(reproductive_condition %in% values, 
+                                "", reproductive_condition)
+)
+```
+
+
+Almost post-lactating possums.
+
+```{r}
+x <- str_detect(data$reproductive_condition, "apl")
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# Move condition to separate column
+data[x, "lactation_status"] <- "almost post lactating"
+
+# Remove lactation status from rep condition
+data[x,"reproductive_condition"] <- data[x,"reproductive_condition"] %>%
+  str_replace("apl", "")
+```
+
+Post lactacting possums.
+
+```{r}
+regex_string <- "pl|(recent )?[Pp]ost( [Ll](act)?(ating)?)?(, but more recent than others)?|\\dx previously lac|finished lac|(recent )?PL"
+x <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[x,"reproductive_condition"] %>% unique %>% head
+
+# Regex match
+match <- data[x,"reproductive_condition"] %>%
+  str_match(regex_string)
+match[,1] %>% tolower %>% unique
+
+# Move condition to separate column
+data[x, "lactation_status"] <- "post lactating"
+
+# Remove lactation status from rep condition
+data[x,"reproductive_condition"] <- data[x,"reproductive_condition"] %>%
+  str_replace(regex_string, "")
+```
+
+Lactating possums often have nipple information as well. Parse these later.
+
+#### Nipple condition
+
+```{r}
+data <- data %>% mutate(nipple_condition="")
+```
+
+Lactating and recently lactating.
+
+```{r}
+regex_string <- "(recently( )?)?lac(t(ating)?)?\\??"
+x <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# Move condition to separate column
+data[x, "lactation_status"] <- "lactating"
+
+# Manual changes
+data[data$reproductive_condition == "4x4lac", "reproductive_condition"] <- 
+  "4x4 lac"
+data[data$reproductive_condition == "lac4x4", "reproductive_condition"] <- 
+  "4x4 lac"
+data[data$reproductive_condition == "2x4lac", "reproductive_condition"] <- 
+  "2x4 lac"
+data[data$reproductive_condition == "recentlylac", "reproductive_condition"] <- 
+  "recently lac"
+
+# "4sw nip/4 lact nip/abort?"
+index <- data$reproductive_condition == "4sw nip/4 lact nip/abort?"
+data[index,"reproductive_condition"] <- ""
+data[index,"nipple_condition"] <- "4ln; 4swn"
+stopifnot(data[index,"other"] == "abort?")
+
+# "4 sw nip, no milk, lact?"
+index <- data$reproductive_condition == "4 sw nip, no milk, lact?"
+data[index,"reproductive_condition"] <- ""
+data[index,"nipple_condition"] <- "4swn; no milk"
+
+# Move nipple condition to separate column
+data[x,"nipple_condition"] <- data[x,"reproductive_condition"]
+data[x,"reproductive_condition"] <- ""
+```
+
+Lactating nipples in the format of `4ln`.
+
+```{r}
+regex_string <- "ln"
+x <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# Mark these as lactating
+data[x, "lactation_status"] <- "lactating"
+
+# Manulally change "4ln milk, young in nest; 4 ln milk"
+index <- data$reproductive_condition == "4ln milk, young in nest; 4 ln milk"
+data[index, "reproductive_condition"] <- "4ln milk"
+data[index, "other"] <- append_note("young in nest", data[index, "other"])
+
+# Manually replace values with multiple values
+find_replace <- list(
+  "4ln milk; 4ln milk" = "4ln milk",
+  "4ln half milk; 4ln" = "4ln half milk",
+  "4ln milk; 4ln" = "4ln milk",
+  "4ln 3 quarter milk; 4ln" = "4ln 3 quarter milk",
+  " ; 4ln" = "4ln"
+)
+for (old in names(find_replace)) {
+  data <- data %>% mutate(
+    reproductive_condition=ifelse(reproductive_condition == old, 
+                                  find_replace[[old]], reproductive_condition))
+}
+
+# Move condition to separate column
+data[x,"nipple_condition"] <- 
+  data[x,"reproductive_condition"] %>% str_trim()
+
+# Remove lactation status from rep condition
+data[x,"reproductive_condition"] <- ""
+```
+
+Lactating nipples in the format of `4x` or `4t` or `4 teets`.
+
+```{r}
+regex_string <- "\\dx|\\dt|\\d teets"
+x <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# Manulally change "4x enlarged teets (grumpy!)"
+index <- data$reproductive_condition == "4x enlarged teets (grumpy!)"
+data[index, "reproductive_condition"] <- "4swn"
+data[index, "other"] <- append_note("grumpy!", data[index, "other"])
+
+# 2 "4x " values are from possums who are post lactating
+data[data$reproductive_condition == "4x ", "reproductive_condition"] <- ""
+
+# Standardize values
+new_value <- data[x,"reproductive_condition"] %>% 
+  str_replace("(\\d) teets", "\\1x") %>%
+  str_replace("(\\d)t", "\\1x")
+new_value %>% unique
+
+# Move condition to separate column
+data[x,"nipple_condition"] <- new_value
+
+# Remove lactation status from rep condition
+data[x,"reproductive_condition"] <- ""
+
+# Mark those with "4x milk" as lactating
+data[data$nipple_condition == "4x milk", "lactation_status"] <- "lactating"
+```
+
+Contracted nipples. Discard information on contracted pouches (not may cases).
+
+```{r}
+regex_string <- "contract"
+x <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# "contracted " values refer to pouches. Remove these values
+# data %>% filter(reproductive_condition == " contracted ")
+data[data$reproductive_condition == " contracted ", "reproductive_condition"] <- ""
+
+# Clean values
+new_values <- data[x,"reproductive_condition"] %>%
+  str_replace("^[,; ]+", "") %>%
+  str_replace(" P and N", "") %>%
+  str_replace(" (nipes|nip)$", " nipples") %>%
+  str_replace(" pouch/nipples", "") %>%
+  str_replace(" pouch and nipples", "") %>%
+  str_replace(" nipples", "")
+new_values %>% unique
+
+# Move condition to separate column
+data[x,"nipple_condition"] <- new_values
+
+# Remove lactation status from rep condition
+data[x,"reproductive_condition"] <- ""
+```
+
+Swollen nipples.
+
+```{r}
+regex_string <- "sw nip"
+x <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# Manual changes
+index <- data$reproductive_condition == 
+  ", no sw nip, saggy mam gland, lots orange fur, dry"
+data[index,"misc_reproductive_notes"] <- append_note(
+  "no sw nip, saggy mam gland", data[index,"misc_reproductive_notes"])
+data[index,"reproductive_condition"] <- ""
+
+index <- data$reproductive_condition == ", half sw nip, half FIP"
+data[index,"nipple_condition"] <- "half swn"
+data[index,"other"] <- append_note("half FIP", data[index,"other"])
+data[index,"reproductive_condition"] <- ""
+
+index <- data$reproductive_condition == ", no FIP, 2 half sw nip"
+data[index,"nipple_condition"] <- "2 half swn"
+data[index,"other"] <- append_note("no FIP", data[index,"other"])
+data[index,"reproductive_condition"] <- ""
+
+index <- data$reproductive_condition == "4 half sw nip, dark blotches and orange fur"
+data[index,"nipple_condition"] <- "4 half swn, dark blotches"
+data[index,"other"] <- append_note("orange fur", data[index,"other"])
+data[index,"reproductive_condition"] <- ""
+
+# Clean values
+x <- str_detect(data$reproductive_condition, regex_string)
+new_values <- data[x,"reproductive_condition"] %>%
+  str_replace("^[,; ]+", "") %>%
+  str_replace("nipples", "nip") %>%
+  str_replace("sw nip", "swn") %>% 
+  str_replace("3swn", "3 swn")
+new_values %>% unique
+
+# Move condition to separate column
+data[x,"nipple_condition"] <- new_values
+
+# Remove lactation status from rep condition
+data[x,"reproductive_condition"] <- ""
+```
+
+Extract size.
+
+```{r}
+regex_string <- "~|mm"
+x <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# Clean values
+new_values <- data[x,"reproductive_condition"] %>% 
+  str_match("\\d(\\.\\d)?") %>% .[,1] %>% paste0(., "mm")
+new_values %>% unique
+
+# Move to nipple_condition column
+data[x,"nipple_condition"] <- 
+  append_note(new_values, data[x,"nipple_condition"])
+
+# Remove lactation status from rep condition
+data[x,"reproductive_condition"] <- ""
+```
+
+Other values. Handle manually.
+
+```{r}
+x <- str_detect(data$reproductive_condition, "nip|sn|swn")
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+index <- data$reproductive_condition == ", orange fur, nip quarter size"
+data[index,"nipple_condition"] <- "quarter size"
+data[index,"other"] <- append_note("orange fur", data[index,"other"])
+data[index,"reproductive_condition"] <- ""
+
+index <- data$reproductive_condition == ", dry retracted nip, dark blotches"
+data[index,"nipple_condition"] <- "dry retracted, dark blotches"
+data[index,"reproductive_condition"] <- ""
+
+index <- data$reproductive_condition == ", 2 sw. nip., skinny"
+data[index,"nipple_condition"] <- "2 swn"
+data[index,"other"] <- append_note("skinny", data[index,"other"])
+data[index,"reproductive_condition"] <- ""
+
+index <- data$reproductive_condition == " 4swn aborted, , moist abundant orange hair"
+data[index,"nipple_condition"] <- "4 swn"
+data[index,"other"] <- append_note("aborted; moist abundant orange hair",
+                                   data[index,"other"])
+data[index,"reproductive_condition"] <- ""
+
+index <- data$reproductive_condition == "4swn 0 milk dry recent wean"
+data[index,"nipple_condition"] <- "4 swn, dry, no milk, recent wean"
+data[index,"reproductive_condition"] <- ""
+
+index <- data$reproductive_condition == "4sn dry"
+data[index,"nipple_condition"] <- "4 swn, dry"
+data[index,"reproductive_condition"] <- ""
+
+index <- data$reproductive_condition == "4swn dry"
+data[index,"nipple_condition"] <- "4 swn, dry"
+data[index,"reproductive_condition"] <- ""
+```
+
+#### Remaining values
+
+```{r}
+x <- data$reproductive_condition != ""
+
+# Clean up values
+new_values <- data$reproductive_condition[x] %>%
+  str_replace("^[ ;,.]+", "") %>%
+  str_replace("[ ;,]+$", "") %>%
+  str_replace("fip", "FIP")
+new_values %>% unique
+
+# Replace
+data$reproductive_condition[x] <- new_values
+```
+
+Sort out FIP info.
+
+```{r}
+x <- str_detect(data$reproductive_condition, "FIP")
+
+# What values?
+data[x,"reproductive_condition"] %>% unique
+
+# "lpd  FIP" - going to assume this means "ldp"
+index <- data$reproductive_condition == "lpd  FIP"
+data[index, "pouch_condition"] <- "ldp"
+data[index, "reproductive_condition"] <- "FIP"
+
+# "recent" values refere to post lactating recent. Remove these.
+new_values <- data[x,"reproductive_condition"] %>%
+  str_replace("recent, ", "") %>%
+  str_replace("No", "no")
+new_values %>% unique
+
+# Move to FIP info to other column
+data[x,"other"] <- 
+  append_note(new_values, data[x,"other"])
+
+# Remove FIP status from rep condition
+data[x,"reproductive_condition"] <- ""
+```
+
+Manually sort out the remaining values
+
+```{r}
+# What values?
+data[,"reproductive_condition"] %>% unique
+
+# "teets prom but no milky"
+index <- data$reproductive_condition == "teets prom but no milky"
+stopifnot(data[index, "nipple_condition"] == "")
+data[index, "nipple_condition"] <- "swn, no milk"   ### TODO: check
+data[index, "reproductive_condition"] <- ""
+
+# "recent" - this can be removed since it refers to recent PL
+data[data$reproductive_condition == "recent", "reproductive_condition"] <- ""
+
+# "lpd"
+index <- data$reproductive_condition == "lpd"   ### TODO: check
+stopifnot(data[index, "pouch_condition"] == "")
+data[index, "pouch_condition"] <- "ldp"
+data[index, "reproductive_condition"] <- ""
+
+# "no Fat In Pouch"
+index <- data$reproductive_condition == "no Fat In Pouch"
+data[index, "misc_reproductive_notes"] <- 
+  append_note("no fat in pouch", data[index, "misc_reproductive_notes"])
+data[index, "reproductive_condition"] <- ""
+
+# "abort"
+index <- data$reproductive_condition == "abort"
+data[index, "other"] <- 
+  append_note("aborted", data[index, "other"])
+data[index, "reproductive_condition"] <- ""
+
+# "0py"
+index <- data$reproductive_condition == "0py"
+stopifnot(data[index, "number_of_pouch_young"] == "0")
+data[index, "reproductive_condition"] <- ""
+
+# "m??"
+index <- data$reproductive_condition == "m??"
+data[index, "reproductive_condition"] <- ""
+
+# "check; 16"
+index <- data$reproductive_condition == "check; 16"
+data[index, "pouch_young_size_in_mm"] <- "16"
+data[index, "reproductive_condition"] <- ""
+
+# "check; 25"
+index <- data$reproductive_condition == "check; 25"
+data[index, "pouch_young_size_in_mm"] <- "25"
+data[index, "reproductive_condition"] <- ""
+
+# "4 LN little or no milk"
+index <- data$reproductive_condition == "4 LN little or no milk"
+data[index, "nipple_condition"] <- "4ln, no milk"
+data[index, "reproductive_condition"] <- ""
+
+# "pos"
+index <- data$reproductive_condition == "pos"
+stopifnot(data[index,"misc_reproductive_notes"] == "pos bred in prev years")
+data[index, "reproductive_condition"] <- ""
+
+# "2 tags (8774, 8851)" - info already recorded in replaced_tags
+index <- data$reproductive_condition == "2 tags (8774, 8851)"
+stopifnot(replaced_tags[["8774"]] == c("8774", "8851"))
+stopifnot(data[index,"other"] == "")
+data[index,"other"] <- "Replaced tag 8851"
+data[index, "reproductive_condition"] <- ""
+
+# "may give birth soon"
+index <- data$reproductive_condition == "may give birth soon"
+data[index,"misc_reproductive_notes"] <-
+  append_note("may give birth soon", data[index,"misc_reproductive_notes"])
+data[index, "reproductive_condition"] <- ""
+```
+
+Check all values are empty.
+
+```{r}
+stopifnot(data$reproductive_condition == "")
+```
+
+-----
+
+# Tidy columns
+
+```{r}
+colnames(data)
+```
+
+```{r}
+# Remove unneeded columns and rename columns
+tidy_data <- data %>% select(-day, -line, -point, -age, -py, -reproductive_condition, 
+                -new, -first_weight) %>%
+  rename(rep_con_string=rep_con, other_notes=other)
+
+# Re-order columns
+tidy_data <- tidy_data %>% select(
+  date, location, id, sex, life_stage, weight, head, body, tail,
+  pregnancy_status, pouch_condition, number_of_pouch_young, 
+  pouch_young_size_in_mm, lactation_status, nipple_condition, 
+  testis_size_status, testis_size_in_mm, misc_reproductive_notes,
+  other_notes,
+  country, state_or_region, mountain, year, 
+  wild_captive, source_population, 
+  taxon_id, phylum:genus, species, subspecies, common_name,
+  identified_by, collector,
+  everything())
+```
+
+-----
+
+# Session Info
+
+```{r}
+devtools::session_info()
+```
+
