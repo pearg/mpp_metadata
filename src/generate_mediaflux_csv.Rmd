@@ -1,0 +1,248 @@
+---
+title: "Mediaflux MPP Metadata"
+author: "Jessica Chung"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+    toc_depth: 4
+    code_folding: show
+---
+
+From tidy data generated from `metadata_wrangling.Rmd`, generate csv files
+to feed into Mediaflux via a Python script.
+
+Create an asset for each possum. Associate the asset to the sequencing files 
+with a relationship. Each possum asset should have a variable number of metadata 
+libraries (correlated to the number of times it's been captured).
+
+-----
+
+# Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=TRUE, message=TRUE, error=TRUE, echo=TRUE)
+knitr::opts_knit$set(root.dir = "..")
+options(digits=6)
+options(width=160)
+```
+
+```{r message=FALSE}
+library("ProjectTemplate")
+load.project()
+```
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(stringr)
+library(readxl)
+library(forcats)
+```
+
+```{r}
+append_note <- function(x, existing_value, sep="; ") {
+  # Append a note separated with a delimiter if a comment already exists.
+  # Else, replace NA with note.
+  joined_values <- paste(existing_value, x, sep=sep)
+  new_value <- ifelse(is.na(existing_value) | existing_value == "",
+                      x, joined_values) %>%
+    str_replace("; $", "")
+  return(new_value)
+}
+```
+
+-----
+
+# Load data
+
+```{r}
+tidy_data <- readRDS(file="cache/tidy_data.rds")
+microsat_data <- readRDS(file="cache/microsat_data.rds")
+replaced_tags <- readRDS(file="cache/replaced_tags.rds")
+```
+
+```{r include=FALSE, eval=FALSE}
+tidy_data %>% View()
+```
+
+
+-----
+
+# Static information
+
+Each possum (or bandicoot, in the future) asset should have one of these rows
+which translates into a metadata library.
+
+```{r}
+# Information relevant to sample (should be the same for each capture instance)
+# Individuals sometimes have different mountains and wild_captive status at different times
+x <- tidy_data %>% select(id, sex, country:state_or_region, taxon_id:common_name)
+
+# Check that rows are the same for each ID
+stopifnot(x %>% unique %>% group_by(id) %>% summarise(n=n()) %>% 
+            filter(n != 1) %>% nrow %>% magrittr::equals(0))
+
+static_df <- x %>% unique
+static_cols <- colnames(x)
+```
+
+```{r}
+static_df %>% head
+dim(static_df)
+```
+
+-----
+
+# Variable informaiton
+
+Values can change with each capture record. Each possum asset can have zero or
+multiple of these.
+
+```{r}
+# Information that can change with each capture
+variable_cols <- c("id", colnames(tidy_data)[! colnames(tidy_data) %in% static_cols])
+variable_df <- tidy_data[,variable_cols]
+```
+
+```{r}
+variable_df %>% head
+```
+
+
+### Special records
+
+These are either captive from zoos or candidate males from Hotham, Timms Spurs.
+These records don't have dates (but have years), location (but has mountain instead),
+life_stage.
+
+```{r}
+# variable_df %>% filter(is.na(date))
+
+# Remove location field since the mountain field contains the same information.
+special_records <- variable_df %>% filter(is.na(date)) %>%
+  select(-date, -location, -life_stage, -identified_by, -collector) %>%
+  select(id, year, mountain, everything())
+
+# Note: even though timms spur males have testis size, not classified as enlarged 
+# because they aren't explicitly labeled adult
+
+# Rename mountain to source and add 'Healesville Sanctuary' as a value.
+special_records <- special_records %>% rename(source=mountain) %>%
+  mutate(source=ifelse(! is.na(source_population) & 
+                         str_detect(source_population, 'Healesville'), 
+                       "Healesville Sanctuary zoo release", source)) %>%
+  select(-source_population)
+```
+
+```{r}
+special_records %>% head
+```
+
+
+### Wild capture records
+
+```{r}
+# Wild capture records always have dates recorded
+wild_capture_records <- variable_df %>% filter(! is.na(date))
+
+# Check columns don't hold useful information
+stopifnot(wild_capture_records$wild_captive == "wild")
+stopifnot(is.na(wild_capture_records$source_population))
+
+# Remove unneeded columns
+wild_capture_records <- wild_capture_records %>% 
+  select(-mountain, -year, -wild_captive, -source_population)
+
+```
+
+```{r}
+# What's the max number of captures for any particular possum?
+wild_capture_records %>% group_by(id) %>%
+  summarise(n=n()) %>% arrange(desc(n)) %>% head
+```
+
+```{r}
+# wild_capture_records %>% filter(id == "0241")
+```
+
+-----
+
+# Genotype records
+
+One possum asset can have multiple microsat records. Ideally, a possum should
+only have one, but some possums have been genotyped multiple times and have
+non-concordant genotypes.
+
+```{r}
+microsat_data %>% head
+```
+
+-----
+
+# Summary metadata
+
+If useful, can also store a summary of the wild capture metadata.
+E.g. earliest capture, juvenile capture, adult capture, etc.
+
+```{r}
+last_non_NA <- function(x) {
+  last(x[!is.na(x)])
+}
+```
+
+```{r}
+summary_data <- wild_capture_records %>%
+  group_by(id) %>%
+  summarise(earliest_capture=min(date),
+            latest_capture=max(date),
+            number_of_captures=n(),
+            juvenile_capture="juvenile" %in% life_stage,
+            immature_capture="immature adult" %in% life_stage,
+            adult_capture="adult" %in% life_stage,
+            most_recent_weight=last_non_NA(weight),
+            most_recent_head=last_non_NA(head),
+            most_recent_body=last_non_NA(body),
+            most_recent_tail=last_non_NA(tail))
+```
+
+```{r}
+summary_data %>% head
+```
+
+```{r}
+summary_data %>% filter(juvenile_capture, adult_capture) %>%
+  arrange(desc(number_of_captures)) %>% head
+```
+
+```{r include=FALSE, eval=FALSE}
+# wild_capture_records %>% filter(id == "0577") %>%
+#   arrange(date) %>% View()
+```
+
+-----
+
+# Save files
+
+```{r}
+write.table(static_df, file="output/general.tsv", sep="\t", 
+            row.names=FALSE, quote=FALSE)
+write.table(special_records, file="output/special_records.tsv", sep="\t", 
+            row.names=FALSE, quote=FALSE)
+write.table(wild_capture_records, file="output/wild_capture_records.tsv", sep="\t", 
+            row.names=FALSE, quote=FALSE)
+write.table(microsat_data, file="output/microsat_data.tsv", sep="\t", 
+            row.names=FALSE, quote=FALSE)
+write.table(summary_data, file="output/summary_data.tsv", sep="\t", 
+            row.names=FALSE, quote=FALSE)
+```
+
+-----
+
+# Session Info
+
+```{r}
+devtools::session_info()
+```
+
+
