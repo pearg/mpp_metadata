@@ -16,8 +16,16 @@ Organise Mountain Pygmy Possum sample metadata from Excel spreadsheets.
 
 # Setup
 
-```{r}
-# knitr::opts_knit$set(root.dir = "..")
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=TRUE, message=TRUE, error=TRUE, echo=TRUE)
+knitr::opts_knit$set(root.dir = "..")
+options(digits=6)
+options(width=160)
+```
+
+```{r message=FALSE}
+library("ProjectTemplate")
+load.project()
 ```
 
 ```{r warning=FALSE, message=FALSE}
@@ -48,8 +56,8 @@ Genotype file stores microsat data and other possum data.
 
 ```{r}
 # Filenames
-capture_filename <- "/Users/jess/Work/2017_pearg/mpp_metadata/data/Btr2016_Master_25July2017_FINAL.xlsx"
-genotype_filename <- "/Users/jess/Work/2017_pearg/mpp_metadata/data/MPP_Master_Genotype_Phenotype_March2017\ copy.xlsx"
+capture_filename <- "data/Btr2016_Master_25July2017_FINAL.xlsx"
+genotype_filename <- "data/MPP_Master_Genotype_Phenotype_March2017 copy.xlsx"
 ```
 
 Read in capture spreadsheet.
@@ -660,6 +668,70 @@ data <- full_join(data, non_capture)
 
 -----
 
+# Check individuals
+
+```{r}
+# All records with the same id should be the same sex
+data %>% group_by(id) %>% 
+  filter(sex %in% 1:2) %>%
+  summarise(n_males=sum(sex==2), n=n(), percent_male=n_males/n) %>%
+  filter(! percent_male %in% c(0,1))
+
+# Manually check:
+# 0268, 0398, 8054 looks like it's male
+# 0269, 7140 looks like it's female
+# 0594 looks like two separate animals. Female in 2002-2004, male in 2014.
+# 0707 looks like two separate animals. Female in 2001, male in 2014.
+# Can't tell: 0384 (1 of each and no reproduction info)
+
+# Manually change
+index <- data$id %in% c("0268", "0398", "8054")
+data$sex[index] <- "2"
+
+index <- data$id %in% c("0269", "7140")
+data$sex[index] <- "1"
+
+index <- data$id %in% c("0384")
+data$sex[index] <- "not determined"
+```
+
+Some cases where there are multiple animals for a single ID.
+
+```{r}
+# Find cases where there's > 5 year span between capture dates
+data %>% group_by(id) %>%
+  summarise(min=min(date), max=max(date), sex=mean(as.numeric(sex))) %>%
+  mutate(diff=max-min) %>%
+  filter(diff > lubridate::duration(5, units="years")) %>%
+  arrange(desc(diff))
+```
+
+Plot records per time.
+
+```{r}
+ggplot(data, aes(x=date, y=1)) + 
+  geom_jitter(height=1, width=0, size=1, alpha=0.5)
+```
+
+```{r}
+ggplot(data %>% filter(id %in% c("0379", "0707", "0594")), 
+       aes(x=date, y=1, color=id)) + 
+  geom_jitter(height=1, width=0, size=1, alpha=0.5)
+```
+
+
+```{r}
+# Change 0379, 0707, 0594
+# For any records before 2005, rename the sample "####_old"
+index <- data$date < lubridate::ymd("2005-01-01") &
+  data$id %in% c("0379", "0707", "0594")
+table(index)
+
+data[index,"id"] <- paste0(data[index,"id"], "_old")
+```
+
+-----
+
 # Possum phenotypes
 
 ## New fields
@@ -737,6 +809,27 @@ data$sex[is.na(data$sex)] <- "not determined"
 table(data$sex, useNA = "always")
 ```
 
+```{r}
+# If there's an obvious consensus for "not determined" individuals, use it
+na_sex <- data %>% filter(sex == "not determined") %>% .$id
+na_sex
+
+# 0384 can't be determined
+data %>% filter(id == "0384")
+
+# 1420 looks female
+data %>% filter(id == "1420") %>% .$sex %>% table
+data <- data %>% mutate(sex=ifelse(id == "1420", "female", sex))
+
+# 8847 looks female
+data %>% filter(id == "8847") %>% .$sex %>% table
+data <- data %>% mutate(sex=ifelse(id == "8847", "female", sex))
+
+# How many in each group?
+table(data$sex, useNA = "always")
+```
+
+
 ## Body measurements
 
 Body, head, tail, and weight
@@ -775,14 +868,23 @@ data <- data %>% mutate(
 )
 ```
 
+### Sanity check values
+
 There are some values that look like errors.
 
 ```{r}
+probs <- c(0, 0.01, 0.05, 0.1, 0.2,
+           seq(0.25,0.75,by=0.25), 
+           0.8, 0.9, 0.95, 0.98, 0.99, 0.995, 1)
 apply(data[,c("body", "head", "tail", "weight")], 2, function(x) {
-  quantile(x, probs=c(seq(0,0.75,by=0.25), 0.8, 0.9, 0.95, 0.98, 0.99, 0.995, 1), 
-           na.rm=TRUE)})
+  quantile(x, probs=probs, na.rm=TRUE)})
+```
 
-data %>% filter(weight > 70) %>% arrange(weight)
+
+```{r}
+# Possums with weight > 70
+data %>% filter(weight > 70) %>% arrange(weight) %>% 
+  select(id, weight, tail:head)
 ```
 
 Going to assume that anything over 100 is an error and set it to NA.
@@ -802,6 +904,111 @@ data %>% filter(id == "8175") %>% .$weight
 
 # Set all 4 large values as NA
 data <- data %>% mutate(weight=ifelse(weight > 70, NA, weight))
+```
+
+
+Sanity check that body should be larger than head.
+
+```{r}
+# Cases where head is larger than body
+cases <- which(data$head > data$body)
+non_cases <- which(data$head < data$body)
+# These cases are all in Jan/Feb 2013
+# data[cases,]
+
+# How many cases?
+cases %>% length
+```
+
+```{r}
+# What kind of values are expected in each
+data[cases,"body"] %>% summary
+data[non_cases,"body"] %>% summary
+
+data[cases,"head"] %>% summary
+data[non_cases,"head"] %>% summary
+
+# Pretty sure that cases where the recorded head size is larger than the
+# recorded body size should be flipped
+swap <- data$body[cases]
+data$body[cases] <- data$head[cases]
+data$head[cases] <- swap
+```
+
+Check some cases of large head size and small tail size in 2015.
+
+```{r}
+# data %>% filter(head > 40 & tail < 40) %>% select(id, date, weight, tail:head)
+cases <- which(data$head > 40 & data$tail < 40)
+length(cases)
+
+# Summary stats
+data[cases, "head"] %>% summary
+data[cases, "body"] %>% summary
+data[cases, "tail"] %>% summary
+
+# Head should be body
+# Body should be tail
+# Tail should be head
+
+# Swap values
+swap <- data$body[cases]
+data$body[cases] <- data$head[cases]
+data$head[cases] <- data$tail[cases]
+data$tail[cases] <- swap
+```
+
+
+Still one outlier with head size of 62mm
+
+```{r}
+index <- which(data$head > 50)
+data[index,] %>% select(id, tail:head)
+
+# Do other captures of the same ID have measurements? No.
+data %>% filter(id == data[index, "id"]) %>% select(id, tail:head)
+
+# Just set head size to NA
+data[index, "head"] <- NA
+```
+
+
+There are some large males from Hotham 2011 just over 100mm, but the two females
+with body size of 176mm look incorrect.
+
+```{r}
+index <- which(data$body > 105)
+data[index,] %>% select(id, tail:head)
+
+# Can we get the information from other records?.
+# No other records for 0661. For 0967, future record says body size is 72.
+data %>% filter(id %in% data[index, "id"]) %>% select(id, date, tail:head)
+
+# Just set these cases to NA
+data[index, "body"] <- NA
+```
+
+
+```{r}
+# Re-check distribution of values
+apply(data[,c("body", "head", "tail", "weight")], 2, function(x) {
+  quantile(x, probs=probs, na.rm=TRUE)})
+```
+
+Plot histograms for each measurement.
+
+```{r}
+ggplot(data, aes(x=weight, fill=age)) +
+  geom_histogram()
+
+ggplot(data, aes(x=body, fill=age)) +
+  geom_histogram()
+
+ggplot(data, aes(x=head, fill=age)) +
+  geom_histogram()
+
+ggplot(data, aes(x=tail, fill=age)) +
+  geom_histogram()
 ```
 
 
@@ -1949,6 +2156,22 @@ data[index,"nipple_condition"] <- "4 swn, dry"
 data[index,"reproductive_condition"] <- ""
 ```
 
+
+Manually fix instance of `4x4` which should be `4x4 finished lac`
+
+```{r}
+stopifnot(data[data$nipple_condition == "4x4","rep_con"] == "4x4finished lac")
+data[data$nipple_condition == "4x4","nipple_condition"] <- "4x4 finished lac"
+```
+
+Add space between number and `ln` (e.g. `4ln` to `4 ln`).
+
+```{r}
+data$nipple_condition <- data$nipple_condition %>% 
+  str_replace("(\\d)ln", "\\1 ln")
+```
+
+
 #### Remaining values
 
 ```{r}
@@ -2100,6 +2323,58 @@ tidy_data <- tidy_data %>% select(
   taxon_id, phylum:genus, species, subspecies, common_name,
   identified_by, collector,
   everything())
+```
+
+-----
+
+# Column classes
+
+Change column classes if necessary.
+
+```{r}
+tidy_data %>% str
+microsat_data %>% str
+replaced_tags %>% str
+```
+
+```{r}
+# Check that the only characters used are numeric
+stopifnot(! str_detect(tidy_data$pouch_young_size_in_mm, "[^0-9.]"))
+stopifnot(is.na(tidy_data$testis_size_in_mm) |
+            ! str_detect(tidy_data$testis_size_in_mm, "[^0-9.]"))
+
+# Change from characters to numeric
+tidy_data <- tidy_data %>% 
+  mutate(pouch_young_size_in_mm=as.numeric(pouch_young_size_in_mm),
+         testis_size_in_mm=as.numeric(testis_size_in_mm))
+```
+
+```{r}
+# Microsat data should be numeric
+microsat_data <- microsat_data %>% 
+  mutate_at(vars(BP1_FAM_allele1:BC36_PET_allele2), as.numeric)
+```
+
+```{r}
+# View column names for tidy data
+colnames(tidy_data)
+```
+
+```{r include=FALSE, eval=FALSE}
+tidy_data %>% select(rep_con_string, pregnancy_status:misc_reproductive_notes) %>%
+  View
+```
+
+-----
+
+# Write output
+
+Save data frames.
+
+```{r}
+saveRDS(tidy_data, file="cache/tidy_data.rds")
+saveRDS(microsat_data, file="cache/microsat_data.rds")
+saveRDS(replaced_tags, file="cache/replaced_tags.rds")
 ```
 
 -----
