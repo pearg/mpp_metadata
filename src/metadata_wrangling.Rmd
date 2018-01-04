@@ -47,6 +47,11 @@ append_note <- function(x, existing_value, sep="; ") {
 }
 ```
 
+```{r include=FALSE}
+stopifnot(append_note(c("a","b"), c(NA, "1")) ==
+            c("a", "1; b"))
+```
+
 ------
 
 # Read Spreadsheets
@@ -730,6 +735,51 @@ table(index)
 data[index,"id"] <- paste0(data[index,"id"], "_old")
 ```
 
+Manually check possum records.
+
+```{r}
+data %>% group_by(id) %>%
+  summarise(min=min(date), max=max(date), sex=mean(as.numeric(sex))) %>%
+  mutate(diff=max-min) %>%
+  filter(diff > lubridate::duration(4, units="years")) %>%
+  arrange(desc(diff))
+```
+
+```{r}
+# 7051: Assume same possum
+# data %>% filter(id == "7051") %>% View
+
+# 7728: Assume different possums before and after 2010
+# data %>% filter(id == "7728") %>% View
+
+# 8738: Same possum
+# data %>% filter(id == "8738") %>% View
+
+# 0241: Same possum
+# data %>% filter(id == "0241") %>% View
+
+# 8654: Same possum
+# data %>% filter(id == "8654") %>% View
+
+# 8470: Same
+# data %>% filter(id == "8470") %>% View
+
+# 7081: Same
+# data %>% filter(id == "7081") %>% View
+
+# 0269: Same
+# data %>% filter(id == "0269") %>% View
+```
+
+```{r}
+# Change 7728 pre-2010 to *_old
+index <- data$date < lubridate::ymd("2010-01-01") &
+  data$id %in% c("7728")
+sum(index)
+
+data[index,"id"] <- paste0(data[index,"id"], "_old")
+```
+
 -----
 
 # Possum phenotypes
@@ -1177,11 +1227,59 @@ table(data$number_of_pouch_young, useNA="always")
 
 ## Reproductive condition
 
+### Move notes from Other column
+
 ```{r}
-data <- data %>% mutate(reproductive_condition=rep_con,
-                        misc_reproductive_notes="")
+data <- data %>% mutate(misc_reproductive_notes="")
 ```
 
+Some values in the "other" coumn are reproductive related
+
+```{r}
+# Manually going through, these values should be in rep_con:
+# half sw nip, p stretched, no milk, likely preg
+# pos preg / likely preg
+# lop nip 1mm
+# p not moist, preg maybe, half sw nip, p stretched, bred last year
+
+data$other %>% str_detect("preg|\\dmm") %>% data$other[.]
+```
+
+```{r}
+# Manually change the 6 entries
+
+index <- data$other == "half sw nip, p stretched, no milk, likely preg"
+data[index,"other"] <- ""
+data[index,"rep_con"] <- append_note("likely preg; half sw nip, no milk",
+                                     data[index,"rep_con"])  
+data[index,"misc_reproductive_notes"] <- "p stretched"
+
+index <- data$other == "pos preg"
+data[index,"other"] <- ""
+data[index,"misc_reproductive_notes"] <- "pos preg"
+
+index <- data$other == "lop nip 1mm"
+data[index,"other"] <- ""
+data[index,"rep_con"] <- append_note("lop nip 1mm", data[index,"rep_con"])
+
+index <- data$other == "left eye missing, mites around face, bred previously, not preg this time"
+data[index,"other"] <- "left eye missing, mites around face"
+data[index,"misc_reproductive_notes"] <- "bred previously, not preg this time"
+
+index <- data$other == "p not moist, preg maybe, half sw nip, p stretched, bred last year"
+data[index,"other"] <- ""
+data[index,"rep_con"] <- append_note("half sw nip", data[index,"rep_con"])  
+data[index,"misc_reproductive_notes"] <- "preg maybe, bred last year, p not moist, p stretched"
+
+index <- data$other == "likely preg"
+data[index,"other"] <- ""
+stopifnot(data[index,"rep_con"] == "lmop; lmop like preg.")
+data[index,"rep_con"] <- "lmop; likely preg"
+```
+
+```{r}
+data <- data %>% mutate(reproductive_condition=rep_con)
+```
 
 Handle `2nd Litter values` by moving them to the other column.
 
@@ -1202,11 +1300,22 @@ data[prob_second, "misc_reproductive_notes"] <-
   append_note("2nd litter?", data[prob_second, "misc_reproductive_notes"])
 ```
 
+```{r}
+# Remove unnecessary value
+index <- data$reproductive_condition == "sex wasn't recorded"
+data[index,"reproductive_condition"] <- ""
+```
+
 ### Male conditions
 
 #### Testes condition
 
 Handle male reproductive info. This refers to testis size conditions.
+
+From email: 5mm testes or less - these are normal size testes (fully contracted)
+
+(Remove `testis_size_status` for now. Until there's an easy threshold size to
+classify size into normal/enlarge.)
 
 ```{r}
 # Set testis_size_status as either "normal" or "enlarged" for adult males, 
@@ -1220,12 +1329,12 @@ data %>% filter(sex == "male", life_stage != "adult",
   .$x
 
 # Set testis_size_status
-data <- data %>%
-  mutate(testis_size_status=ifelse(sex == "male" & life_stage == "adult",
-                                   "normal", NA)) %>%
-  mutate(testis_size_status=ifelse(sex == "male" & life_stage == "adult" &
-                                     str_detect(reproductive_condition, "\\d"),
-                                   "enlarged", testis_size_status))
+# data <- data %>%
+#   mutate(testis_size_status=ifelse(sex == "male" & life_stage == "adult",
+#                                    "normal", NA)) %>%
+#   mutate(testis_size_status=ifelse(sex == "male" & life_stage == "adult" &
+#                                      str_detect(reproductive_condition, "\\d"),
+#                                    "enlarged", testis_size_status))
 ```
 
 #### Testes size
@@ -1445,8 +1554,8 @@ index <- data$reproductive_condition == "lop not moist/greasy prob not preg"
 data[index,"reproductive_condition"] <- "ldop"
 data[index,"pregnancy_status"] <- "likely not pregnant"
 
-# "ldop pos not preg, pos bred in prev years"
-index <- data$reproductive_condition == "ldop pos not preg, pos bred in prev years"
+# "ldop pos not preg, "
+index <- data$reproductive_condition == "ldop pos not preg, "
 data[index,"reproductive_condition"] <- "ldop"
 data[index,"pregnancy_status"] <- "likely not pregnant"
 data[index,"misc_reproductive_notes"] <- 
@@ -1627,6 +1736,8 @@ data[index,"pouch_young_size_in_mm"] <- "5"
 data[index,"misc_reproductive_notes"] <- 
   append_note("Probaby gave birth overnight", data[index,"misc_reproductive_notes"])
 data[index,"reproductive_condition"] <- ""
+
+stopifnot(data[x,"reproductive_condition"] == "")
 ```
 
 A few cases with multiple young to handle manually.
@@ -1701,11 +1812,6 @@ data <- data %>% mutate(pouch_condition="")
 Handle cases of juvenile pouches.
 
 ```{r}
-x <- str_detect(data$reproductive_condition, "[Jj]uv")
-
-# What values?
-data[x,"reproductive_condition"] %>% unique
-
 # Which possums are marked as adult, but rep condition indicates juvenile
 discordant <- data %>% filter(life_stage == "adult",
                 str_detect(reproductive_condition, "[Jj]uv")) %>%
@@ -1713,21 +1819,24 @@ discordant <- data %>% filter(life_stage == "adult",
 discordant
 
 # These should be immature adults
-x <- str_detect(data$reproductive_condition, 
-                "^(juv p|Juv P LP unused clean n~0.5( much FIP)?)$")
+regex_string <- "juv p(ouch)?|Juv P LP unused clean"
+x <- str_detect(data$reproductive_condition, regex_string)
+data[x, "reproductive_condition"] <- data[x, "reproductive_condition"] %>% 
+  str_replace(regex_string, "")
 data[x,"life_stage"] <- "immature adult"
 
-# Keep FIP info if available
-# data[x,"reproductive_condition"] <- data[x,"reproductive_condition"] %>% 
-#   str_replace("^(juv p|Juv P LP unused clean n~0.5)( )?", "")
+# Other juvenile values
+x <- str_detect(data$reproductive_condition, "[Jj]uv")
+stopifnot(data[x, "life_stage"] != "adult")
 
-data[x,"other"] <- append_note(data[x,"reproductive_condition"] %>%
-  str_replace("^(juv p|Juv P LP unused clean n~0.5)( )?", ""),
-  data[x,"other"])
+# What values?
+data[x,"reproductive_condition"] %>% unique
 
-# Remove juvenile pouch values since they're uninformative
+# Remove values since they're uninformative
 data[x,"reproductive_condition"] <- ""
 ```
+
+Juvenile reproductive conditions.
 
 ```{r}
 # There's one instance (id 1932, date 18/2/15, weight 29) of a juvenile 
@@ -1743,14 +1852,10 @@ data[x,"reproductive_condition"] %>% unique
 
 # Remove unneeded information
 new_value <- data[x,"reproductive_condition"] %>% 
-  str_replace("Post lactating|clean pouch|nolac|nonlac|no signs of lac", "")
-
-# Append comment to other column
-data[x,"other"] <- append_note(new_value, data[x,"other"])
+  str_replace("Post lactating|clean pouch|nolac|nonlac|no signs( of lac)?", "")
 
 # Remove reproductive condition
-data[x,"reproductive_condition"] <- ""
-
+data[x,"reproductive_condition"] <- new_value
 ```
 
 Handle immature adult cases.
@@ -1830,11 +1935,34 @@ index <- data$reproductive_condition == "lodp"
 stopifnot(data[index,"pouch_condition"] == "")
 data[index,"pouch_condition"] <- "ldop"
 data[index,"reproductive_condition"] <- ""
+```
 
-# "; lmop "
-index <- data$reproductive_condition == "; lmop "
-stopifnot(data[index,"pouch_condition"] == "lmop")
-data[index,"reproductive_condition"] <- ""
+#### Fat in pouch
+
+FIP status
+```{r}
+data$fat_in_pouch <- ""
+```
+
+```{r}
+regex_string <- "((No|no|half|quarter|little|some) )?(fip|FIP)"
+x <- str_detect(data$reproductive_condition, regex_string)
+
+# What values?
+data[x,"reproductive_condition"] %>% unique %>% head
+
+new_value <- data[x, "reproductive_condition"] %>% 
+  str_extract(regex_string) %>%
+  tolower %>% 
+  str_replace("fip", "FIP")
+
+# Set value and remove from reproductive_condition
+data[x, "fat_in_pouch"] <- new_value
+data[x, "reproductive_condition"] <- data[x, "reproductive_condition"] %>% 
+  str_replace(regex_string, "")
+
+# Check no FIP notes left
+stopifnot(! str_detect(data$reproductive_condition, "FIP|fip"))
 ```
 
 #### Lactation status
@@ -1859,8 +1987,9 @@ data <- data %>% mutate(
 )
 ```
 
-
-Almost post-lactating possums.
+Advanced post lactating possums.  
+(These possums should be putting on weight, nipples contracted, 
+approx. 1 month since having litter).
 
 ```{r}
 x <- str_detect(data$reproductive_condition, "apl")
@@ -1869,7 +1998,7 @@ x <- str_detect(data$reproductive_condition, "apl")
 data[x,"reproductive_condition"] %>% unique
 
 # Move condition to separate column
-data[x, "lactation_status"] <- "almost post lactating"
+data[x, "lactation_status"] <- "advanced post lactating"
 
 # Remove lactation status from rep condition
 data[x,"reproductive_condition"] <- data[x,"reproductive_condition"] %>%
@@ -2062,16 +2191,6 @@ data[index,"misc_reproductive_notes"] <- append_note(
   "no sw nip, saggy mam gland", data[index,"misc_reproductive_notes"])
 data[index,"reproductive_condition"] <- ""
 
-index <- data$reproductive_condition == ", half sw nip, half FIP"
-data[index,"nipple_condition"] <- "half swn"
-data[index,"other"] <- append_note("half FIP", data[index,"other"])
-data[index,"reproductive_condition"] <- ""
-
-index <- data$reproductive_condition == ", no FIP, 2 half sw nip"
-data[index,"nipple_condition"] <- "2 half swn"
-data[index,"other"] <- append_note("no FIP", data[index,"other"])
-data[index,"reproductive_condition"] <- ""
-
 index <- data$reproductive_condition == "4 half sw nip, dark blotches and orange fur"
 data[index,"nipple_condition"] <- "4 half swn, dark blotches"
 data[index,"other"] <- append_note("orange fur", data[index,"other"])
@@ -2154,6 +2273,9 @@ data[index,"reproductive_condition"] <- ""
 index <- data$reproductive_condition == "4swn dry"
 data[index,"nipple_condition"] <- "4 swn, dry"
 data[index,"reproductive_condition"] <- ""
+
+# Check remaining values are handled
+stopifnot(data[x,"reproductive_condition"] == "")
 ```
 
 
@@ -2180,39 +2302,34 @@ x <- data$reproductive_condition != ""
 # Clean up values
 new_values <- data$reproductive_condition[x] %>%
   str_replace("^[ ;,.]+", "") %>%
-  str_replace("[ ;,]+$", "") %>%
-  str_replace("fip", "FIP")
+  str_replace("[ ;,]+$", "")
 new_values %>% unique
 
 # Replace
 data$reproductive_condition[x] <- new_values
 ```
 
-Sort out FIP info.
+Sort out remaining FIP info.
 
 ```{r}
-x <- str_detect(data$reproductive_condition, "FIP")
+x <- data$reproductive_condition == "no Fat In Pouch"
 
-# What values?
-data[x,"reproductive_condition"] %>% unique
+data[x,"fat_in_pouch"] <- "no FIP"
+data[x,"reproductive_condition"] <- ""
+```
 
-# "lpd  FIP" - going to assume this means "ldp"
-index <- data$reproductive_condition == "lpd  FIP"
+```{r}
+# "lpd" - going to assume this means "ldp"
+index <- data$reproductive_condition == "lpd"
 data[index, "pouch_condition"] <- "ldp"
-data[index, "reproductive_condition"] <- "FIP"
+data[index, "reproductive_condition"] <- ""
 
 # "recent" values refere to post lactating recent. Remove these.
+x <- data$reproductive_condition != ""
 new_values <- data[x,"reproductive_condition"] %>%
   str_replace("recent, ", "") %>%
   str_replace("No", "no")
 new_values %>% unique
-
-# Move to FIP info to other column
-data[x,"other"] <- 
-  append_note(new_values, data[x,"other"])
-
-# Remove FIP status from rep condition
-data[x,"reproductive_condition"] <- ""
 ```
 
 Manually sort out the remaining values
@@ -2224,28 +2341,22 @@ data[,"reproductive_condition"] %>% unique
 # "teets prom but no milky"
 index <- data$reproductive_condition == "teets prom but no milky"
 stopifnot(data[index, "nipple_condition"] == "")
-data[index, "nipple_condition"] <- "swn, no milk"   ### TODO: check
+data[index, "nipple_condition"] <- "swn, no milk"
 data[index, "reproductive_condition"] <- ""
 
 # "recent" - this can be removed since it refers to recent PL
 data[data$reproductive_condition == "recent", "reproductive_condition"] <- ""
 
-# "lpd"
-index <- data$reproductive_condition == "lpd"   ### TODO: check
-stopifnot(data[index, "pouch_condition"] == "")
-data[index, "pouch_condition"] <- "ldp"
-data[index, "reproductive_condition"] <- ""
-
-# "no Fat In Pouch"
-index <- data$reproductive_condition == "no Fat In Pouch"
-data[index, "misc_reproductive_notes"] <- 
-  append_note("no fat in pouch", data[index, "misc_reproductive_notes"])
-data[index, "reproductive_condition"] <- ""
-
 # "abort"
 index <- data$reproductive_condition == "abort"
 data[index, "other"] <- 
   append_note("aborted", data[index, "other"])
+data[index, "reproductive_condition"] <- ""
+
+# "not bred"
+index <- data$reproductive_condition == "not bred"
+data[index, "misc_reproductive_notes"] <- 
+  append_note("not_bred", data[index, "misc_reproductive_notes"])
 data[index, "reproductive_condition"] <- ""
 
 # "0py"
@@ -2314,9 +2425,9 @@ tidy_data <- data %>% select(-day, -line, -point, -age, -py, -reproductive_condi
 # Re-order columns
 tidy_data <- tidy_data %>% select(
   date, location, id, sex, life_stage, weight, head, body, tail,
-  pregnancy_status, pouch_condition, number_of_pouch_young, 
+  pregnancy_status, pouch_condition, fat_in_pouch, number_of_pouch_young, 
   pouch_young_size_in_mm, lactation_status, nipple_condition, 
-  testis_size_status, testis_size_in_mm, misc_reproductive_notes,
+  testis_size_in_mm, misc_reproductive_notes,
   other_notes,
   country, state_or_region, mountain, year, 
   wild_captive, source_population, 
