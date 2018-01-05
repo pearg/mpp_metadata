@@ -2408,6 +2408,33 @@ Check all values are empty.
 stopifnot(data$reproductive_condition == "")
 ```
 
+## Misc
+
+```{r}
+# ID: 0272 on 2011-11-01 pouch is listed as both moist and dry.
+# Assume moist is correct.
+index <- data$pouch_condition == "dry lmdop"
+data[index, "pouch_condition"] <- "lmdop"
+```
+
+
+Moist pouch likely indicates pregnancy if recording during spring 
+(October/November). 
+
+If pouch is moist and month is 10/11 and `pregnancy_status` is blank,
+set status to 'likely pregnant'.
+
+```{r}
+# Get rows which possums have moist pouch and no pregnancy status
+moist_index <- data$pouch_condition %>% str_detect(., "m\\w*p$")
+spring_index <- lubridate::month(data$date) %in% c(10, 11)
+blank_ps_index <- data$pregnancy_status == ""
+
+# Set value to likely pregnant
+data[moist_index & spring_index & blank_ps_index, "pregnancy_status"] <- 
+  "likely pregnant"
+```
+
 -----
 
 # Tidy columns
@@ -2420,7 +2447,7 @@ colnames(data)
 # Remove unneeded columns and rename columns
 tidy_data <- data %>% select(-day, -line, -point, -age, -py, -reproductive_condition, 
                 -new, -first_weight) %>%
-  rename(rep_con_string=rep_con, other_notes=other)
+  rename(raw_rep_con=rep_con, other_notes=other)
 
 # Re-order columns
 tidy_data <- tidy_data %>% select(
@@ -2472,7 +2499,7 @@ colnames(tidy_data)
 ```
 
 ```{r include=FALSE, eval=FALSE}
-tidy_data %>% select(rep_con_string, pregnancy_status:misc_reproductive_notes) %>%
+tidy_data %>% select(raw_rep_con, pregnancy_status:misc_reproductive_notes) %>%
   View
 ```
 
