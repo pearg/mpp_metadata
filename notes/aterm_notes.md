@@ -166,6 +166,13 @@ asset.create :meta < :mf-note < :note "Hello world" > >
 # The `:meta` parameter is xml structured where `<` and `>` indicate going down/up the xml tree
 ```
 
+If you're using a document type you created, you'll need to also provide the
+namespace where the document exists.
+
+```
+asset.create :meta < :my-project:my-meta-doc < :my-data "Hello world" > >
+```
+
 ### Edit assets
 
 
