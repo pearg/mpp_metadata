@@ -90,6 +90,8 @@ static_cols <- colnames(x)
 ```{r}
 static_df %>% head
 dim(static_df)
+
+stopifnot(length(static_df$id) == length(unique(static_df$id)))
 ```
 
 -----
@@ -101,8 +103,9 @@ multiple of these.
 
 ```{r}
 # Information that can change with each capture
-variable_cols <- c("id", colnames(tidy_data)[! colnames(tidy_data) %in% static_cols])
-variable_df <- tidy_data[,variable_cols]
+variable_cols <- c("id", "sex", colnames(tidy_data)[! colnames(tidy_data) %in% static_cols])
+variable_df <- tidy_data[,variable_cols] %>% 
+  select(id, date, location, sex, everything())
 ```
 
 ```{r}
@@ -218,6 +221,21 @@ summary_data %>% filter(juvenile_capture, adult_capture) %>%
 ```{r include=FALSE, eval=FALSE}
 # wild_capture_records %>% filter(id == "0577") %>%
 #   arrange(date) %>% View()
+```
+
+-----
+
+# Replaced tags
+
+```{r}
+static_df$alternative_id = NA
+for (tag in names(replaced_tags)) {
+  print(tag)
+  static_df <- static_df %>% 
+  mutate(alternative_id=ifelse(id == tag, 
+                               paste(replaced_tags[[tag]], collapse=","),
+                               alternative_id))
+}
 ```
 
 -----
